@@ -85,11 +85,14 @@ class BuildContextTests(unittest.TestCase):
 
 class MainTests(unittest.TestCase):
     def test_main_returns_zero_for_supported_tool(self) -> None:
-        exit_code = main(["/home/user/.local/bin/pip", "install", "requests"])
+        exit_code = main(
+            ["/home/user/.local/bin/pip", "install", "requests"],
+            config_loader=lambda: None,
+        )
 
         self.assertEqual(exit_code, 0)
 
     def test_main_returns_two_for_unsupported_tool(self) -> None:
-        exit_code = main(["/usr/bin/python", "-V"])
+        exit_code = main(["/usr/bin/python", "-V"], config_loader=lambda: None)
 
         self.assertEqual(exit_code, 2)
