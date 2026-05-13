@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from cooling_shim.cli import build_context, main
 from cooling_shim.config import load_config
+from cooling_shim.models import AppConfig
 
 
 class LoadConfigTests(unittest.TestCase):
@@ -117,7 +118,7 @@ class MainTests(unittest.TestCase):
                 recorded.append(invocation)
                 return 17
 
-            with patch("cooling_shim.cli.load_config"):
+            with patch("cooling_shim.cli.load_config", return_value=AppConfig()):
                 exit_code = main(
                     [str(shim_binary), "install", "requests"],
                     env={"PATH": f"{shim_dir}:{real_dir}"},
@@ -129,7 +130,7 @@ class MainTests(unittest.TestCase):
         invocation = recorded[0]
         self.assertEqual(invocation.program, real_binary)
         self.assertEqual(invocation.argv, (str(real_binary), "install", "requests"))
-        self.assertEqual(invocation.env_overrides, {})
+        self.assertEqual(invocation.env_overrides["PIP_UPLOADED_PRIOR_TO"], "P7D")
 
     def test_main_returns_two_for_unsupported_tool(self) -> None:
         with patch("cooling_shim.cli.load_config"):
