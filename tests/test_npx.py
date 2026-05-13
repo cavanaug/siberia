@@ -299,6 +299,71 @@ class NpxInvocationTests(unittest.TestCase):
             ),
         )
 
+    def test_build_invocation_rewrites_npx_package_short_flag_before_double_dash(self) -> None:
+        invocation = build_invocation(
+            context=CommandContext(
+                "npx",
+                ("-p", "typescript", "--", "tsc", "--version"),
+                "-p",
+            ),
+            config=AppConfig(),
+            real_binary=Path("/usr/bin/npx"),
+            now_utc=FIXED_NOW,
+            load_packument=lambda package_name: {
+                "name": "typescript",
+                "time": {
+                    "created": "2024-01-01T00:00:00.000Z",
+                    "modified": "2026-05-13T11:00:00.000Z",
+                    "5.8.0": "2026-05-12T10:00:00.000Z",
+                    "5.7.3": "2026-05-01T12:00:00.000Z",
+                },
+            },
+        )
+
+        self.assertEqual(
+            invocation.argv,
+            (
+                "/usr/bin/npx",
+                "-p",
+                "typescript@5.7.3",
+                "--",
+                "tsc",
+                "--version",
+            ),
+        )
+
+    def test_build_invocation_rewrites_npx_attached_package_flag_before_double_dash(self) -> None:
+        invocation = build_invocation(
+            context=CommandContext(
+                "npx",
+                ("--package=typescript", "--", "tsc", "--version"),
+                "--package=typescript",
+            ),
+            config=AppConfig(),
+            real_binary=Path("/usr/bin/npx"),
+            now_utc=FIXED_NOW,
+            load_packument=lambda package_name: {
+                "name": "typescript",
+                "time": {
+                    "created": "2024-01-01T00:00:00.000Z",
+                    "modified": "2026-05-13T11:00:00.000Z",
+                    "5.8.0": "2026-05-12T10:00:00.000Z",
+                    "5.7.3": "2026-05-01T12:00:00.000Z",
+                },
+            },
+        )
+
+        self.assertEqual(
+            invocation.argv,
+            (
+                "/usr/bin/npx",
+                "--package=typescript@5.7.3",
+                "--",
+                "tsc",
+                "--version",
+            ),
+        )
+
     def test_build_invocation_rejects_npx_without_package(self) -> None:
         with self.assertRaises(PolicyError):
             build_invocation(
