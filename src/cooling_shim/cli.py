@@ -48,7 +48,6 @@ def main(
 ) -> int:
     active_argv = tuple(sys.argv if argv is None else argv)
     active_env = dict(os.environ if env is None else env)
-    active_config = config if config is not None else load_config()
     active_clock = clock or (lambda: datetime.now(timezone.utc))
     active_binary_resolver = binary_resolver or resolve_real_binary
     active_runner = runner or exec_runner
@@ -60,13 +59,14 @@ def main(
         if context.tool_name not in SUPPORTED_TOOLS:
             return 2
 
+        active_config = config if config is not None else load_config()
+        now_utc = active_clock()
+
         shim_dir = Path(active_argv[0]).resolve().parent
         real_binary = active_binary_resolver(context.tool_name, shim_dir, active_env.get("PATH"))
 
         active_packument_loader = packument_loader
         if active_packument_loader is None:
-            now_utc = active_clock()
-
             def active_packument_loader(package_name: str) -> dict[str, object]:
                 return npm_registry.load_packument(
                     package_name,
@@ -78,7 +78,7 @@ def main(
             context=context,
             config=active_config,
             real_binary=real_binary,
-            now_utc=active_clock(),
+            now_utc=now_utc,
             load_packument=active_packument_loader,
         )
         return active_runner(invocation)

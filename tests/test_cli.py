@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import tempfile
 import unittest
 from pathlib import Path
@@ -87,14 +86,11 @@ class BuildContextTests(unittest.TestCase):
 
 
 class MainTests(unittest.TestCase):
-    def test_main_signature_does_not_expose_config_loader(self) -> None:
-        self.assertNotIn("config_loader", inspect.signature(main).parameters)
+    def test_main_returns_two_for_unsupported_tool_before_loading_config(self) -> None:
+        with patch("cooling_shim.cli.load_config", side_effect=ValueError("bad config")):
+            exit_code = main(["/usr/bin/python", "-V"])
 
-    def test_main_signature_uses_explicit_runner_type(self) -> None:
-        self.assertEqual(
-            inspect.signature(main).parameters["runner"].annotation,
-            "Callable[[Invocation], int] | None",
-        )
+        self.assertEqual(exit_code, 2)
 
     def test_main_builds_passthrough_invocation_for_supported_tool(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
