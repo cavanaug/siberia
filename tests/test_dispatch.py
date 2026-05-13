@@ -10,6 +10,10 @@ from cooling_shim.real_bin import resolve_real_binary
 
 
 class ResolveRealBinaryTests(unittest.TestCase):
+    def test_resolve_real_binary_rejects_empty_path(self) -> None:
+        with self.assertRaises(FileNotFoundError):
+            resolve_real_binary("npm", Path("/tmp/shim"), None)
+
     def test_resolve_real_binary_skips_shim_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -23,6 +27,32 @@ class ResolveRealBinaryTests(unittest.TestCase):
             real_binary.chmod(0o755)
 
             resolved = resolve_real_binary("npm", shim_dir, f"{shim_dir}:{real_dir}")
+
+        self.assertEqual(resolved, real_binary)
+
+    def test_resolve_real_binary_skips_non_executable_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            shim_dir = root / "shim"
+            blocked_dir = root / "blocked"
+            real_dir = root / "real"
+            shim_dir.mkdir()
+            blocked_dir.mkdir()
+            real_dir.mkdir()
+
+            blocked_binary = blocked_dir / "npm"
+            blocked_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+            blocked_binary.chmod(0o644)
+
+            real_binary = real_dir / "npm"
+            real_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+            real_binary.chmod(0o755)
+
+            resolved = resolve_real_binary(
+                "npm",
+                shim_dir,
+                f"{shim_dir}:{blocked_dir}:{real_dir}",
+            )
 
         self.assertEqual(resolved, real_binary)
 

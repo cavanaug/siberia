@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 
@@ -17,7 +18,7 @@ def resolve_real_binary(tool_name: str, shim_dir: Path, path_value: str | None) 
             continue
 
         candidate = candidate_dir / tool_name
-        if candidate.exists() and candidate.is_file():
+        if candidate.exists() and candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate
 
     raise FileNotFoundError(f"Could not resolve real binary for {tool_name}")

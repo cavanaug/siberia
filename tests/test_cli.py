@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import inspect
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from cooling_shim.cli import build_context, main
 from cooling_shim.config import load_config
@@ -84,15 +86,47 @@ class BuildContextTests(unittest.TestCase):
 
 
 class MainTests(unittest.TestCase):
-    def test_main_returns_zero_for_supported_tool(self) -> None:
-        exit_code = main(
-            ["/home/user/.local/bin/pip", "install", "requests"],
-            config_loader=lambda: None,
-        )
+    def test_main_signature_does_not_expose_config_loader(self) -> None:
+        self.assertNotIn("config_loader", inspect.signature(main).parameters)
 
-        self.assertEqual(exit_code, 0)
+    def test_main_builds_passthrough_invocation_for_supported_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            shim_dir = root / "shim"
+            real_dir = root / "real"
+            shim_dir.mkdir()
+            real_dir.mkdir()
+
+            shim_binary = shim_dir / "pip"
+            shim_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+            shim_binary.chmod(0o755)
+
+            real_binary = real_dir / "pip"
+            real_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+            real_binary.chmod(0o755)
+
+            recorded: list[object] = []
+
+            def runner(invocation: object) -> int:
+                recorded.append(invocation)
+                return 17
+
+            with patch("cooling_shim.cli.load_config"):
+                exit_code = main(
+                    [str(shim_binary), "install", "requests"],
+                    env={"PATH": f"{shim_dir}:{real_dir}"},
+                    runner=runner,
+                )
+
+        self.assertEqual(exit_code, 17)
+        self.assertEqual(len(recorded), 1)
+        invocation = recorded[0]
+        self.assertEqual(invocation.program, real_binary)
+        self.assertEqual(invocation.argv, (str(real_binary), "install", "requests"))
+        self.assertEqual(invocation.env_overrides, {})
 
     def test_main_returns_two_for_unsupported_tool(self) -> None:
-        exit_code = main(["/usr/bin/python", "-V"], config_loader=lambda: None)
+        with patch("cooling_shim.cli.load_config"):
+            exit_code = main(["/usr/bin/python", "-V"])
 
         self.assertEqual(exit_code, 2)
