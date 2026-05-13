@@ -47,6 +47,10 @@ class SpecParsingTests(unittest.TestCase):
         with self.assertRaises(PolicyError):
             parse_package_spec("")
 
+    def test_parse_dist_tag_like_spec_rejects_with_policy_error(self) -> None:
+        with self.assertRaisesRegex(PolicyError, "Unsupported package spec"):
+            parse_package_spec("create-vite@latest")
+
 
 class CooledVersionSelectionTests(unittest.TestCase):
     def test_selects_latest_version_older_than_minimum_age(self) -> None:
@@ -129,6 +133,49 @@ class NpxInvocationTests(unittest.TestCase):
             ),
         )
 
+    def test_build_invocation_rewrites_npx_after_cache_flag_with_value(self) -> None:
+        invocation = build_invocation(
+            context=CommandContext("npx", ("--cache", "/tmp", "create-vite", "demo"), "--cache"),
+            config=AppConfig(),
+            real_binary=Path("/usr/bin/npx"),
+            now_utc=FIXED_NOW,
+            load_packument=lambda package_name: PACKUMENT,
+        )
+
+        self.assertEqual(
+            invocation.argv,
+            (
+                "/usr/bin/npx",
+                "--cache",
+                "/tmp",
+                "create-vite@5.4.0",
+                "demo",
+            ),
+        )
+
+    def test_build_invocation_rewrites_npx_attached_package_flag(self) -> None:
+        invocation = build_invocation(
+            context=CommandContext(
+                "npx",
+                ("--package=create-vite", "create-vite", "demo"),
+                "--package=create-vite",
+            ),
+            config=AppConfig(),
+            real_binary=Path("/usr/bin/npx"),
+            now_utc=FIXED_NOW,
+            load_packument=lambda package_name: PACKUMENT,
+        )
+
+        self.assertEqual(
+            invocation.argv,
+            (
+                "/usr/bin/npx",
+                "--package=create-vite@5.4.0",
+                "create-vite@5.4.0",
+                "demo",
+            ),
+        )
+
     def test_build_invocation_rejects_npx_without_package(self) -> None:
         with self.assertRaises(PolicyError):
             build_invocation(
@@ -143,6 +190,16 @@ class NpxInvocationTests(unittest.TestCase):
         with self.assertRaises(PolicyError):
             build_invocation(
                 context=CommandContext("npx", ("create-vite@6.0.0", "demo"), "create-vite@6.0.0"),
+                config=AppConfig(),
+                real_binary=Path("/usr/bin/npx"),
+                now_utc=FIXED_NOW,
+                load_packument=lambda package_name: PACKUMENT,
+            )
+
+    def test_build_invocation_rejects_unsupported_npx_dist_tag_spec(self) -> None:
+        with self.assertRaisesRegex(PolicyError, "Unsupported package spec"):
+            build_invocation(
+                context=CommandContext("npx", ("create-vite@latest", "demo"), "create-vite@latest"),
                 config=AppConfig(),
                 real_binary=Path("/usr/bin/npx"),
                 now_utc=FIXED_NOW,

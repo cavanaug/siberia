@@ -11,7 +11,7 @@ from cooling_shim.npx import (
     package_spec_argument_index,
     parse_package_spec,
     rewrite_npm_exec_args,
-    rewrite_package_spec,
+    rewrite_npx_args,
     select_cooled_version,
     validate_requested_version,
 )
@@ -108,9 +108,7 @@ def build_invocation(
             program=real_binary,
             argv=(
                 str(real_binary),
-                *context.args[:spec_index],
-                rewrite_package_spec(original_spec, selected_version),
-                *context.args[spec_index + 1 :],
+                *rewrite_npx_args(context.args, spec_index, selected_version),
             ),
             env_overrides={},
         )

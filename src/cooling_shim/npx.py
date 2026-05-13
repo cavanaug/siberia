@@ -6,6 +6,16 @@ from cooling_shim.errors import PolicyError
 from cooling_shim.models import PackageRequest
 
 
+FLAGS_REQUIRING_VALUES = frozenset({
+    "--cache",
+    "-c",
+    "--userconfig",
+    "--call",
+    "-p",
+    "--shell",
+})
+
+
 def parse_package_spec(spec: str) -> PackageRequest:
     if not spec:
         raise PolicyError("Package spec must not be empty")
@@ -18,6 +28,8 @@ def parse_package_spec(spec: str) -> PackageRequest:
 
     name, separator, version = spec.partition("@")
     if separator:
+        if not version or not _looks_like_plain_version(version):
+            raise PolicyError(f"Unsupported package spec: {spec}")
         return PackageRequest(package_name=name, requested_version=version or None)
     return PackageRequest(package_name=spec, requested_version=None)
 
@@ -77,14 +89,46 @@ def package_spec_argument_index(args: tuple[str, ...]) -> int:
     if not args:
         raise PolicyError("npx requires a package name")
 
+    skip_next = False
+
     for index, value in enumerate(args):
+        if skip_next:
+            skip_next = False
+            continue
+
         if value == "--":
             break
+        if value.startswith("--package="):
+            continue
+        if value in {"--package", "-p"}:
+            skip_next = True
+            continue
+        if value in FLAGS_REQUIRING_VALUES:
+            skip_next = True
+            continue
         if value.startswith("-"):
             continue
         return index
 
     raise PolicyError("npx requires a package name")
+
+
+def rewrite_npx_args(args: tuple[str, ...], spec_index: int, selected_version: str) -> tuple[str, ...]:
+    rewritten = list(args)
+    rewritten[spec_index] = rewrite_package_spec(rewritten[spec_index], selected_version)
+
+    for index, value in enumerate(rewritten):
+        if value == "--package":
+            if index + 1 >= len(rewritten):
+                raise PolicyError("npx is missing a --package value")
+            rewritten[index + 1] = rewrite_package_spec(rewritten[index + 1], selected_version)
+            continue
+
+        if value.startswith("--package="):
+            spec = value.split("=", 1)[1]
+            rewritten[index] = f"--package={rewrite_package_spec(spec, selected_version)}"
+
+    return tuple(rewritten)
 
 
 def npm_exec_package_specs(args: tuple[str, ...]) -> tuple[str, ...]:
@@ -104,6 +148,22 @@ def npm_exec_package_specs(args: tuple[str, ...]) -> tuple[str, ...]:
         raise PolicyError("npm exec is missing a --package value")
 
     return tuple(specs)
+
+
+def _looks_like_plain_version(version: str) -> bool:
+    if version.startswith(("^", "~", ">", "<", "=", "*")):
+        return False
+
+    pieces = version.split(".")
+    if not pieces or any(not piece for piece in pieces):
+        return False
+
+    for piece in pieces:
+        head = piece.split("-", 1)[0].split("+", 1)[0]
+        if not head.isdigit():
+            return False
+
+    return True
 
 
 def select_cooled_version(packument: dict[str, object], now_utc: datetime, min_age_days: int) -> str:
