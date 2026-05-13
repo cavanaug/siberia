@@ -44,9 +44,9 @@ class GuardedCommandTests(unittest.TestCase):
         context = CommandContext("npm", ("install",), "install")
         self.assertTrue(should_guard_command(context))
 
-    def test_npx_is_passthrough_until_task_4(self) -> None:
+    def test_npx_is_guarded(self) -> None:
         context = CommandContext("npx", ("cowsay", "hello"), None)
-        self.assertFalse(should_guard_command(context))
+        self.assertTrue(should_guard_command(context))
 
 
 class PassthroughInvocationTests(unittest.TestCase):

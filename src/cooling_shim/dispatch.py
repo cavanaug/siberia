@@ -2,19 +2,31 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from cooling_shim.models import AppConfig, CommandContext, Invocation
 from cooling_shim.native import inject_npm_before, pip_env_overrides, pnpm_env_overrides
+from cooling_shim.npx import (
+    parse_package_spec,
+    rewrite_npm_exec_args,
+    rewrite_package_spec,
+    select_cooled_version,
+    validate_requested_version,
+)
 
 
 GUARDED_SUBCOMMANDS: dict[str, set[str | None]] = {
     "pip": {"install"},
     "npm": {"install", "ci", "update", "exec"},
     "pnpm": {"install", "add", "update"},
+    "npx": {None},
 }
 
 
 def should_guard_command(context: CommandContext) -> bool:
+    if context.tool_name == "npx":
+        return True
+
     guarded = GUARDED_SUBCOMMANDS.get(context.tool_name, set())
     return context.subcommand in guarded
 
@@ -32,8 +44,62 @@ def build_invocation(
     config: AppConfig,
     real_binary: Path,
     now_utc: datetime,
+    load_packument: Callable[[str], dict[str, object]] | None = None,
 ) -> Invocation:
     invocation = build_passthrough_invocation(real_binary, context)
+
+    if context.tool_name == "npm" and context.subcommand == "exec" and config.enable_npx:
+        if load_packument is None:
+            raise ValueError("load_packument is required for npm exec package resolution")
+
+        package_index = context.args.index("--package") + 1
+        original_spec = context.args[package_index]
+        request = parse_package_spec(original_spec)
+        packument = load_packument(request.package_name)
+        selected_version = (
+            validate_requested_version(
+                request.package_name,
+                request.requested_version,
+                packument,
+                now_utc,
+                min_age_days=config.min_age_days,
+            )
+            if request.requested_version
+            else select_cooled_version(packument, now_utc, min_age_days=config.min_age_days)
+        )
+        return Invocation(
+            program=real_binary,
+            argv=(str(real_binary), *rewrite_npm_exec_args(context.args, selected_version)),
+            env_overrides={},
+        )
+
+    if context.tool_name == "npx" and config.enable_npx:
+        if load_packument is None:
+            raise ValueError("load_packument is required for npx")
+
+        original_spec = context.args[0]
+        request = parse_package_spec(original_spec)
+        packument = load_packument(request.package_name)
+        selected_version = (
+            validate_requested_version(
+                request.package_name,
+                request.requested_version,
+                packument,
+                now_utc,
+                min_age_days=config.min_age_days,
+            )
+            if request.requested_version
+            else select_cooled_version(packument, now_utc, min_age_days=config.min_age_days)
+        )
+        return Invocation(
+            program=real_binary,
+            argv=(
+                str(real_binary),
+                rewrite_package_spec(original_spec, selected_version),
+                *context.args[1:],
+            ),
+            env_overrides={},
+        )
 
     if not should_guard_command(context):
         return invocation

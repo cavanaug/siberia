@@ -27,3 +27,9 @@ class Invocation:
     program: Path
     argv: tuple[str, ...]
     env_overrides: dict[str, str]
+
+
+@dataclass(slots=True, frozen=True)
+class PackageRequest:
+    package_name: str
+    requested_version: str | None
