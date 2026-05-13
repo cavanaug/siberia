@@ -7,6 +7,9 @@ from cooling_shim.models import PackageRequest
 
 
 def parse_package_spec(spec: str) -> PackageRequest:
+    if not spec:
+        raise PolicyError("Package spec must not be empty")
+
     if spec.startswith("@"):
         name, separator, version = spec[1:].rpartition("@")
         if separator:
@@ -43,13 +46,64 @@ def validate_requested_version(
     return requested_version
 
 
-def rewrite_npm_exec_args(args: tuple[str, ...], selected_version: str) -> tuple[str, ...]:
+def rewrite_npm_exec_args(
+    args: tuple[str, ...],
+    selected_versions: dict[str, str],
+) -> tuple[str, ...]:
     rewritten = list(args)
-    for index, value in enumerate(rewritten[:-1]):
+    rewritten_any = False
+
+    for index, value in enumerate(rewritten):
         if value == "--package":
-            rewritten[index + 1] = rewrite_package_spec(rewritten[index + 1], selected_version)
-            return tuple(rewritten)
-    raise PolicyError("npm exec is missing a --package value")
+            if index + 1 >= len(rewritten):
+                raise PolicyError("npm exec is missing a --package value")
+            spec = rewritten[index + 1]
+            rewritten[index + 1] = rewrite_package_spec(spec, selected_versions[spec])
+            rewritten_any = True
+            continue
+
+        if value.startswith("--package="):
+            spec = value.split("=", 1)[1]
+            rewritten[index] = f"--package={rewrite_package_spec(spec, selected_versions[spec])}"
+            rewritten_any = True
+
+    if not rewritten_any:
+        raise PolicyError("npm exec is missing a --package value")
+
+    return tuple(rewritten)
+
+
+def package_spec_argument_index(args: tuple[str, ...]) -> int:
+    if not args:
+        raise PolicyError("npx requires a package name")
+
+    for index, value in enumerate(args):
+        if value == "--":
+            break
+        if value.startswith("-"):
+            continue
+        return index
+
+    raise PolicyError("npx requires a package name")
+
+
+def npm_exec_package_specs(args: tuple[str, ...]) -> tuple[str, ...]:
+    specs: list[str] = []
+
+    for index, value in enumerate(args):
+        if value == "--package":
+            if index + 1 >= len(args):
+                raise PolicyError("npm exec is missing a --package value")
+            specs.append(args[index + 1])
+            continue
+
+        if value.startswith("--package="):
+            specs.append(value.split("=", 1)[1])
+
+    if not specs:
+        raise PolicyError("npm exec is missing a --package value")
+
+    return tuple(specs)
 
 
 def select_cooled_version(packument: dict[str, object], now_utc: datetime, min_age_days: int) -> str:

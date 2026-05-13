@@ -43,6 +43,10 @@ class SpecParsingTests(unittest.TestCase):
         self.assertEqual(request.package_name, "@scope/tool")
         self.assertEqual(request.requested_version, "1.2.3")
 
+    def test_parse_empty_package_rejects_with_policy_error(self) -> None:
+        with self.assertRaises(PolicyError):
+            parse_package_spec("")
+
 
 class CooledVersionSelectionTests(unittest.TestCase):
     def test_selects_latest_version_older_than_minimum_age(self) -> None:
@@ -106,6 +110,35 @@ class NpxInvocationTests(unittest.TestCase):
             ),
         )
 
+    def test_build_invocation_rewrites_npx_after_yes_flag(self) -> None:
+        invocation = build_invocation(
+            context=CommandContext("npx", ("--yes", "create-vite", "demo"), "--yes"),
+            config=AppConfig(),
+            real_binary=Path("/usr/bin/npx"),
+            now_utc=FIXED_NOW,
+            load_packument=lambda package_name: PACKUMENT,
+        )
+
+        self.assertEqual(
+            invocation.argv,
+            (
+                "/usr/bin/npx",
+                "--yes",
+                "create-vite@5.4.0",
+                "demo",
+            ),
+        )
+
+    def test_build_invocation_rejects_npx_without_package(self) -> None:
+        with self.assertRaises(PolicyError):
+            build_invocation(
+                context=CommandContext("npx", tuple(), None),
+                config=AppConfig(),
+                real_binary=Path("/usr/bin/npx"),
+                now_utc=FIXED_NOW,
+                load_packument=lambda package_name: PACKUMENT,
+            )
+
     def test_build_invocation_rejects_pinned_npx_version_that_is_too_new(self) -> None:
         with self.assertRaises(PolicyError):
             build_invocation(
@@ -133,10 +166,72 @@ class NpxInvocationTests(unittest.TestCase):
             invocation.argv,
             (
                 "/usr/bin/npm",
+                "--before=2026-05-06T12:00:00Z",
                 "exec",
                 "--package",
                 "create-vite@5.4.0",
                 "--",
+                "create-vite",
+                "demo",
+            ),
+        )
+
+    def test_build_invocation_rewrites_all_npm_exec_package_flags(self) -> None:
+        invocation = build_invocation(
+            context=CommandContext(
+                "npm",
+                (
+                    "exec",
+                    "--package=create-vite",
+                    "--package",
+                    "@scope/tool",
+                    "--",
+                    "create-vite",
+                ),
+                "exec",
+            ),
+            config=AppConfig(),
+            real_binary=Path("/usr/bin/npm"),
+            now_utc=FIXED_NOW,
+            load_packument=lambda package_name: PACKUMENT if package_name == "create-vite" else {
+                "name": "@scope/tool",
+                "time": {
+                    "created": "2024-01-01T00:00:00.000Z",
+                    "modified": "2026-05-13T11:00:00.000Z",
+                    "2.0.0": "2026-05-12T10:00:00.000Z",
+                    "1.5.0": "2026-05-01T12:00:00.000Z",
+                },
+            },
+        )
+
+        self.assertEqual(
+            invocation.argv,
+            (
+                "/usr/bin/npm",
+                "--before=2026-05-06T12:00:00Z",
+                "exec",
+                "--package=create-vite@5.4.0",
+                "--package",
+                "@scope/tool@1.5.0",
+                "--",
+                "create-vite",
+            ),
+        )
+
+    def test_build_invocation_leaves_plain_npm_exec_on_native_path(self) -> None:
+        invocation = build_invocation(
+            context=CommandContext("npm", ("exec", "create-vite", "demo"), "exec"),
+            config=AppConfig(),
+            real_binary=Path("/usr/bin/npm"),
+            now_utc=FIXED_NOW,
+        )
+
+        self.assertEqual(
+            invocation.argv,
+            (
+                "/usr/bin/npm",
+                "--before=2026-05-06T12:00:00Z",
+                "exec",
                 "create-vite",
                 "demo",
             ),

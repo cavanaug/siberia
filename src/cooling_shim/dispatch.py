@@ -7,6 +7,8 @@ from typing import Callable
 from cooling_shim.models import AppConfig, CommandContext, Invocation
 from cooling_shim.native import inject_npm_before, pip_env_overrides, pnpm_env_overrides
 from cooling_shim.npx import (
+    npm_exec_package_specs,
+    package_spec_argument_index,
     parse_package_spec,
     rewrite_npm_exec_args,
     rewrite_package_spec,
@@ -48,28 +50,38 @@ def build_invocation(
 ) -> Invocation:
     invocation = build_passthrough_invocation(real_binary, context)
 
-    if context.tool_name == "npm" and context.subcommand == "exec" and config.enable_npx:
+    if (
+        context.tool_name == "npm"
+        and context.subcommand == "exec"
+        and config.enable_npx
+        and any(arg == "--package" or arg.startswith("--package=") for arg in context.args)
+    ):
         if load_packument is None:
             raise ValueError("load_packument is required for npm exec package resolution")
 
-        package_index = context.args.index("--package") + 1
-        original_spec = context.args[package_index]
-        request = parse_package_spec(original_spec)
-        packument = load_packument(request.package_name)
-        selected_version = (
-            validate_requested_version(
-                request.package_name,
-                request.requested_version,
-                packument,
-                now_utc,
-                min_age_days=config.min_age_days,
+        selected_versions: dict[str, str] = {}
+        for original_spec in npm_exec_package_specs(context.args):
+            request = parse_package_spec(original_spec)
+            packument = load_packument(request.package_name)
+            selected_versions[original_spec] = (
+                validate_requested_version(
+                    request.package_name,
+                    request.requested_version,
+                    packument,
+                    now_utc,
+                    min_age_days=config.min_age_days,
+                )
+                if request.requested_version
+                else select_cooled_version(packument, now_utc, min_age_days=config.min_age_days)
             )
-            if request.requested_version
-            else select_cooled_version(packument, now_utc, min_age_days=config.min_age_days)
-        )
+
         return Invocation(
             program=real_binary,
-            argv=(str(real_binary), *rewrite_npm_exec_args(context.args, selected_version)),
+            argv=inject_npm_before(
+                (str(real_binary), *rewrite_npm_exec_args(context.args, selected_versions)),
+                now_utc,
+                config,
+            ),
             env_overrides={},
         )
 
@@ -77,7 +89,8 @@ def build_invocation(
         if load_packument is None:
             raise ValueError("load_packument is required for npx")
 
-        original_spec = context.args[0]
+        spec_index = package_spec_argument_index(context.args)
+        original_spec = context.args[spec_index]
         request = parse_package_spec(original_spec)
         packument = load_packument(request.package_name)
         selected_version = (
@@ -95,8 +108,9 @@ def build_invocation(
             program=real_binary,
             argv=(
                 str(real_binary),
+                *context.args[:spec_index],
                 rewrite_package_spec(original_spec, selected_version),
-                *context.args[1:],
+                *context.args[spec_index + 1 :],
             ),
             env_overrides={},
         )
