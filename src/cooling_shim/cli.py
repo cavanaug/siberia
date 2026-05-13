@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from collections.abc import Mapping
+import os
 from pathlib import Path
 from typing import Callable
 import sys
 
 from cooling_shim.config import load_config
-from cooling_shim.models import AppConfig
-from cooling_shim.models import CommandContext
+from cooling_shim.dispatch import build_passthrough_invocation, should_guard_command
+from cooling_shim.models import AppConfig, CommandContext, Invocation
+from cooling_shim.real_bin import resolve_real_binary
 
 
 SUPPORTED_TOOLS = frozenset({"pip", "npm", "pnpm", "npx"})
@@ -26,8 +29,25 @@ def build_context(argv: Sequence[str]) -> CommandContext:
 def main(
     argv: Sequence[str] | None = None,
     config_loader: Callable[[], AppConfig] = load_config,
+    env: Mapping[str, str] | None = None,
+    runner: Callable[[Invocation], int] | None = None,
 ) -> int:
-    active_argv = list(sys.argv if argv is None else argv)
+    active_argv = tuple(sys.argv if argv is None else argv)
+    active_env = dict(os.environ if env is None else env)
     context = build_context(active_argv)
     config_loader()
-    return 0 if context.tool_name in SUPPORTED_TOOLS else 2
+
+    if context.tool_name not in SUPPORTED_TOOLS:
+        return 2
+
+    shim_dir = Path(active_argv[0]).resolve().parent
+    real_binary = resolve_real_binary(context.tool_name, shim_dir, active_env.get("PATH"))
+    invocation = build_passthrough_invocation(real_binary, context)
+
+    if should_guard_command(context):
+        invocation = build_passthrough_invocation(real_binary, context)
+
+    if runner is None:
+        return 0
+
+    return runner(invocation)

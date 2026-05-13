@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 
-@dataclass(frozen=True)
+@dataclass(slots=True, frozen=True)
 class AppConfig:
     min_age_days: int = 7
     enable_pip: bool = True
@@ -14,8 +15,15 @@ class AppConfig:
     cache_ttl_seconds: int = 3600
 
 
-@dataclass(frozen=True)
+@dataclass(slots=True, frozen=True)
 class CommandContext:
     tool_name: str
     args: tuple[str, ...]
     subcommand: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class Invocation:
+    program: Path
+    argv: tuple[str, ...]
+    env_overrides: dict[str, str]
