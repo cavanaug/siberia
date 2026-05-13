@@ -11,14 +11,10 @@ GUARDED_SUBCOMMANDS: dict[str, set[str | None]] = {
     "pip": {"install"},
     "npm": {"install", "ci", "update", "exec"},
     "pnpm": {"install", "add", "update"},
-    "npx": {None},
 }
 
 
 def should_guard_command(context: CommandContext) -> bool:
-    if context.tool_name == "npx":
-        return True
-
     guarded = GUARDED_SUBCOMMANDS.get(context.tool_name, set())
     return context.subcommand in guarded
 
