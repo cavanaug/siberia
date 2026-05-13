@@ -87,11 +87,12 @@ def rewrite_npm_exec_args(
     return tuple(rewritten)
 
 
-def package_spec_argument_index(args: tuple[str, ...]) -> int:
+def package_spec_argument_index(args: tuple[str, ...]) -> int | None:
     if not args:
         raise PolicyError("npx requires a package name")
 
     skip_next = False
+    has_package_flags = False
 
     for index, value in enumerate(args):
         if skip_next:
@@ -101,8 +102,10 @@ def package_spec_argument_index(args: tuple[str, ...]) -> int:
         if value == "--":
             break
         if value.startswith("--package="):
+            has_package_flags = True
             continue
         if value in {"--package", "-p"}:
+            has_package_flags = True
             skip_next = True
             continue
         if value in FLAGS_REQUIRING_VALUES:
@@ -110,21 +113,27 @@ def package_spec_argument_index(args: tuple[str, ...]) -> int:
             continue
         if value.startswith("-"):
             continue
+        if has_package_flags and not _has_non_option_following(args, index + 1):
+            return None
         return index
+
+    if has_package_flags:
+        return None
 
     raise PolicyError("npx requires a package name")
 
 
 def rewrite_npx_args(
     args: tuple[str, ...],
-    spec_index: int,
+    spec_index: int | None,
     selected_versions: dict[str, str],
 ) -> tuple[str, ...]:
     rewritten = list(args)
-    rewritten[spec_index] = rewrite_package_spec(
-        rewritten[spec_index],
-        selected_versions[rewritten[spec_index]],
-    )
+    if spec_index is not None:
+        rewritten[spec_index] = rewrite_package_spec(
+            rewritten[spec_index],
+            selected_versions[rewritten[spec_index]],
+        )
 
     for index, value in enumerate(rewritten):
         if value in {"--package", "-p"}:
@@ -160,7 +169,7 @@ def npm_exec_package_specs(args: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(specs)
 
 
-def npx_package_specs(args: tuple[str, ...], main_spec_index: int) -> tuple[str, ...]:
+def npx_package_specs(args: tuple[str, ...], main_spec_index: int | None) -> tuple[str, ...]:
     specs: list[str] = []
 
     for index, value in enumerate(args):
@@ -173,8 +182,29 @@ def npx_package_specs(args: tuple[str, ...], main_spec_index: int) -> tuple[str,
         if value.startswith("--package="):
             specs.append(value.split("=", 1)[1])
 
-    specs.append(args[main_spec_index])
+    if main_spec_index is not None:
+        specs.append(args[main_spec_index])
+
     return tuple(specs)
+
+
+def _package_flag_value_indexes(args: tuple[str, ...]) -> set[int]:
+    indexes: set[int] = set()
+
+    for index, value in enumerate(args):
+        if value in {"--package", "-p"} and index + 1 < len(args):
+            indexes.add(index + 1)
+
+    return indexes
+
+
+def _has_non_option_following(args: tuple[str, ...], start_index: int) -> bool:
+    for value in args[start_index:]:
+        if value == "--":
+            break
+        if not value.startswith("-"):
+            return True
+    return False
 
 
 def _looks_like_plain_version(version: str) -> bool:
