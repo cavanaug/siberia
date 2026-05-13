@@ -10,7 +10,6 @@ def _ensure_replaceable(path: Path) -> None:
 
 
 def _replace_symlink(path: Path, target: Path) -> None:
-    _ensure_replaceable(path)
     if path.exists() or path.is_symlink():
         path.unlink()
     path.symlink_to(target)
@@ -18,6 +17,14 @@ def _replace_symlink(path: Path, target: Path) -> None:
 
 def install_shims(repo_root: Path, target_dir: Path, tool_names: Iterable[str]) -> None:
     source = repo_root / "bin" / "cooling-shim"
+    if not source.exists():
+        raise FileNotFoundError(f"Missing shim source: {source}")
+
+    tool_names = tuple(tool_names)
+    planned_paths = (target_dir / "cooling-shim", *(target_dir / tool_name for tool_name in tool_names))
+    for path in planned_paths:
+        _ensure_replaceable(path)
+
     target_dir.mkdir(parents=True, exist_ok=True)
 
     master_link = target_dir / "cooling-shim"
