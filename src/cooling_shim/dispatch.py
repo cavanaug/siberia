@@ -8,6 +8,7 @@ from cooling_shim.models import AppConfig, CommandContext, Invocation
 from cooling_shim.native import inject_npm_before, pip_env_overrides, pnpm_env_overrides
 from cooling_shim.npx import (
     npm_exec_package_specs,
+    npx_package_specs,
     package_spec_argument_index,
     parse_package_spec,
     rewrite_npm_exec_args,
@@ -90,25 +91,27 @@ def build_invocation(
             raise ValueError("load_packument is required for npx")
 
         spec_index = package_spec_argument_index(context.args)
-        original_spec = context.args[spec_index]
-        request = parse_package_spec(original_spec)
-        packument = load_packument(request.package_name)
-        selected_version = (
-            validate_requested_version(
-                request.package_name,
-                request.requested_version,
-                packument,
-                now_utc,
-                min_age_days=config.min_age_days,
+        selected_versions: dict[str, str] = {}
+        for original_spec in npx_package_specs(context.args, spec_index):
+            request = parse_package_spec(original_spec)
+            packument = load_packument(request.package_name)
+            selected_versions[original_spec] = (
+                validate_requested_version(
+                    request.package_name,
+                    request.requested_version,
+                    packument,
+                    now_utc,
+                    min_age_days=config.min_age_days,
+                )
+                if request.requested_version
+                else select_cooled_version(packument, now_utc, min_age_days=config.min_age_days)
             )
-            if request.requested_version
-            else select_cooled_version(packument, now_utc, min_age_days=config.min_age_days)
-        )
+
         return Invocation(
             program=real_binary,
             argv=(
                 str(real_binary),
-                *rewrite_npx_args(context.args, spec_index, selected_version),
+                *rewrite_npx_args(context.args, spec_index, selected_versions),
             ),
             env_overrides={},
         )

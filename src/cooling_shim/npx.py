@@ -23,6 +23,8 @@ def parse_package_spec(spec: str) -> PackageRequest:
     if spec.startswith("@"):
         name, separator, version = spec[1:].rpartition("@")
         if separator:
+            if not version or not _looks_like_plain_version(version):
+                raise PolicyError(f"Unsupported package spec: {spec}")
             return PackageRequest(package_name=f"@{name}", requested_version=version or None)
         return PackageRequest(package_name=spec, requested_version=None)
 
@@ -113,20 +115,28 @@ def package_spec_argument_index(args: tuple[str, ...]) -> int:
     raise PolicyError("npx requires a package name")
 
 
-def rewrite_npx_args(args: tuple[str, ...], spec_index: int, selected_version: str) -> tuple[str, ...]:
+def rewrite_npx_args(
+    args: tuple[str, ...],
+    spec_index: int,
+    selected_versions: dict[str, str],
+) -> tuple[str, ...]:
     rewritten = list(args)
-    rewritten[spec_index] = rewrite_package_spec(rewritten[spec_index], selected_version)
+    rewritten[spec_index] = rewrite_package_spec(
+        rewritten[spec_index],
+        selected_versions[rewritten[spec_index]],
+    )
 
     for index, value in enumerate(rewritten):
-        if value == "--package":
+        if value in {"--package", "-p"}:
             if index + 1 >= len(rewritten):
-                raise PolicyError("npx is missing a --package value")
-            rewritten[index + 1] = rewrite_package_spec(rewritten[index + 1], selected_version)
+                raise PolicyError(f"npx is missing a {value} value")
+            spec = rewritten[index + 1]
+            rewritten[index + 1] = rewrite_package_spec(spec, selected_versions[spec])
             continue
 
         if value.startswith("--package="):
             spec = value.split("=", 1)[1]
-            rewritten[index] = f"--package={rewrite_package_spec(spec, selected_version)}"
+            rewritten[index] = f"--package={rewrite_package_spec(spec, selected_versions[spec])}"
 
     return tuple(rewritten)
 
@@ -147,6 +157,23 @@ def npm_exec_package_specs(args: tuple[str, ...]) -> tuple[str, ...]:
     if not specs:
         raise PolicyError("npm exec is missing a --package value")
 
+    return tuple(specs)
+
+
+def npx_package_specs(args: tuple[str, ...], main_spec_index: int) -> tuple[str, ...]:
+    specs: list[str] = []
+
+    for index, value in enumerate(args):
+        if value in {"--package", "-p"}:
+            if index + 1 >= len(args):
+                raise PolicyError(f"npx is missing a {value} value")
+            specs.append(args[index + 1])
+            continue
+
+        if value.startswith("--package="):
+            specs.append(value.split("=", 1)[1])
+
+    specs.append(args[main_spec_index])
     return tuple(specs)
 
 
