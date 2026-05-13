@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 import os
 from pathlib import Path
+from typing import Callable
 import sys
 
 from cooling_shim.config import load_config
@@ -28,7 +29,7 @@ def build_context(argv: Sequence[str]) -> CommandContext:
 def main(
     argv: Sequence[str] | None = None,
     env: Mapping[str, str] | None = None,
-    runner: callable | None = None,
+    runner: Callable[[Invocation], int] | None = None,
 ) -> int:
     active_argv = tuple(sys.argv if argv is None else argv)
     active_env = dict(os.environ if env is None else env)

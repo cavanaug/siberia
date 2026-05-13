@@ -89,6 +89,12 @@ class MainTests(unittest.TestCase):
     def test_main_signature_does_not_expose_config_loader(self) -> None:
         self.assertNotIn("config_loader", inspect.signature(main).parameters)
 
+    def test_main_signature_uses_explicit_runner_type(self) -> None:
+        self.assertEqual(
+            inspect.signature(main).parameters["runner"].annotation,
+            "Callable[[Invocation], int] | None",
+        )
+
     def test_main_builds_passthrough_invocation_for_supported_tool(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
