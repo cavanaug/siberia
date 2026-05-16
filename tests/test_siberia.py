@@ -22,7 +22,7 @@ spec.loader.exec_module(siberia)
 from siberia import (
     AppConfig,
     load_config,
-    cmd_init,
+    cmd_shellenv,
     cmd_config,
     main,
     parse_age,
@@ -203,60 +203,70 @@ class LoadConfigTests(unittest.TestCase):
                 )
 
 
-class InitSubcommandTests(unittest.TestCase):
-    def test_init_emits_pip_export(self) -> None:
+class ShellenvSubcommandTests(unittest.TestCase):
+    def test_shellenv_emits_pip_export(self) -> None:
         out = io.StringIO()
-        cmd_init(AppConfig(min_age_days=7), out)
+        cmd_shellenv(AppConfig(min_age_days=7), out)
         self.assertIn("export PIP_UPLOADED_PRIOR_TO=P7D", out.getvalue())
 
-    def test_init_emits_uv_export(self) -> None:
+    def test_shellenv_omits_pip_exports_when_pip_is_disabled(self) -> None:
         out = io.StringIO()
-        cmd_init(AppConfig(min_age_days=7), out)
+        cmd_shellenv(AppConfig(min_age_days=7, enable_pip=False), out)
+        self.assertNotIn("PIP_UPLOADED_PRIOR_TO", out.getvalue())
+
+    def test_shellenv_emits_uv_export(self) -> None:
+        out = io.StringIO()
+        cmd_shellenv(AppConfig(min_age_days=7), out)
         self.assertIn("export UV_EXCLUDE_NEWER=P7D", out.getvalue())
 
-    def test_init_emits_npm_export(self) -> None:
+    def test_shellenv_omits_uv_exports_when_uv_is_disabled(self) -> None:
         out = io.StringIO()
-        cmd_init(AppConfig(min_age_days=7), out)
+        cmd_shellenv(AppConfig(min_age_days=7, enable_uv=False), out)
+        self.assertNotIn("UV_EXCLUDE_NEWER", out.getvalue())
+
+    def test_shellenv_emits_npm_export(self) -> None:
+        out = io.StringIO()
+        cmd_shellenv(AppConfig(min_age_days=7), out)
         self.assertIn("export npm_config_min_release_age=7", out.getvalue())
 
-    def test_init_emits_npm_ignore_scripts_when_npm_enabled(self) -> None:
+    def test_shellenv_emits_npm_ignore_scripts_when_npm_enabled(self) -> None:
         out = io.StringIO()
-        cmd_init(AppConfig(npm_ignore_scripts=True), out)
+        cmd_shellenv(AppConfig(npm_ignore_scripts=True), out)
         self.assertIn("export npm_config_ignore_scripts=true", out.getvalue())
 
-    def test_init_emits_npm_ignore_scripts_for_npx_only_mode(self) -> None:
+    def test_shellenv_emits_npm_ignore_scripts_for_npx_only_mode(self) -> None:
         out = io.StringIO()
-        cmd_init(AppConfig(enable_npm=False, enable_npx=True, npm_ignore_scripts=True), out)
+        cmd_shellenv(AppConfig(enable_npm=False, enable_npx=True, npm_ignore_scripts=True), out)
         self.assertIn("export npm_config_ignore_scripts=true", out.getvalue())
 
-    def test_init_emits_pnpm_export(self) -> None:
+    def test_shellenv_emits_pnpm_export(self) -> None:
         out = io.StringIO()
-        cmd_init(AppConfig(min_age_days=7), out)
+        cmd_shellenv(AppConfig(min_age_days=7), out)
         self.assertIn("export pnpm_config_minimum_release_age=10080", out.getvalue())
 
-    def test_init_emits_pnpm_block_exotic_export(self) -> None:
+    def test_shellenv_emits_pnpm_block_exotic_export(self) -> None:
         out = io.StringIO()
-        cmd_init(AppConfig(), out)
+        cmd_shellenv(AppConfig(), out)
         self.assertIn("export pnpm_config_block_exotic_subdeps=true", out.getvalue())
 
-    def test_init_omits_pnpm_strict_dep_builds_by_default(self) -> None:
+    def test_shellenv_omits_pnpm_strict_dep_builds_by_default(self) -> None:
         out = io.StringIO()
-        cmd_init(AppConfig(), out)
+        cmd_shellenv(AppConfig(), out)
         self.assertNotIn("pnpm_config_strict_dep_builds", out.getvalue())
 
-    def test_init_emits_pnpm_strict_dep_builds_when_enabled(self) -> None:
+    def test_shellenv_emits_pnpm_strict_dep_builds_when_enabled(self) -> None:
         out = io.StringIO()
-        cmd_init(AppConfig(pnpm_strict_dep_builds=True), out)
+        cmd_shellenv(AppConfig(pnpm_strict_dep_builds=True), out)
         self.assertIn("export pnpm_config_strict_dep_builds=true", out.getvalue())
 
-    def test_init_skips_disabled_tools(self) -> None:
+    def test_shellenv_skips_disabled_tools(self) -> None:
         out = io.StringIO()
-        cmd_init(AppConfig(min_age_days=7, enable_npm=False, enable_npx=False), out)
+        cmd_shellenv(AppConfig(min_age_days=7, enable_npm=False, enable_npx=False), out)
         self.assertNotIn("npm_config_min_release_age", out.getvalue())
 
-    def test_init_respects_custom_days(self) -> None:
+    def test_shellenv_respects_custom_days(self) -> None:
         out = io.StringIO()
-        cmd_init(AppConfig(min_age_days=14), out)
+        cmd_shellenv(AppConfig(min_age_days=14), out)
         self.assertIn("export npm_config_min_release_age=14", out.getvalue())
 
 
@@ -384,18 +394,27 @@ class ConfigSubcommandTests(unittest.TestCase):
 
 
 class MainSubcommandTests(unittest.TestCase):
-    def test_main_init_returns_zero(self) -> None:
+    def test_main_shellenv_returns_zero(self) -> None:
         out = io.StringIO()
         with patch("siberia.load_config", return_value=AppConfig()):
-            rc = main(["init"], out=out)
+            rc = main(["shellenv"], out=out)
         self.assertEqual(rc, 0)
 
-    def test_main_init_days_flag_overrides_config(self) -> None:
+    def test_main_shellenv_days_flag_overrides_config(self) -> None:
         out = io.StringIO()
         with patch("siberia.load_config", return_value=AppConfig(min_age_days=7)):
-            rc = main(["init", "--age", "21d"], out=out)
+            rc = main(["shellenv", "--age", "21d"], out=out)
         self.assertEqual(rc, 0)
         self.assertIn("npm_config_min_release_age=21", out.getvalue())
+
+    def test_main_init_is_rejected_by_argparse(self) -> None:
+        err = io.StringIO()
+        with patch("sys.stderr", err):
+            with self.assertRaises(SystemExit) as exc:
+                main(["init"])
+        self.assertEqual(exc.exception.code, 2)
+        self.assertIn("invalid choice", err.getvalue())
+        self.assertIn("init", err.getvalue())
 
     def test_main_config_returns_zero(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -417,7 +436,7 @@ class MainSubcommandTests(unittest.TestCase):
     def test_main_exits_one_on_bad_config(self) -> None:
         err = io.StringIO()
         with patch("siberia.load_config", side_effect=ValueError("bad")):
-            rc = main(["init"], err=err)
+            rc = main(["shellenv"], err=err)
         self.assertEqual(rc, 1)
         self.assertIn("siberia:", err.getvalue())
 
@@ -506,6 +525,6 @@ class ParseAgeTests(unittest.TestCase):
     def test_main_age_weeks_overrides_config(self) -> None:
         out = io.StringIO()
         with patch("siberia.load_config", return_value=AppConfig(min_age_days=7)):
-            rc = main(["init", "--age", "2w"], out=out)
+            rc = main(["shellenv", "--age", "2w"], out=out)
         self.assertEqual(rc, 0)
         self.assertIn("npm_config_min_release_age=14", out.getvalue())

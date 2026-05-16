@@ -2,8 +2,8 @@
 """siberia — supply-chain age policy enforcer.
 
 Usage:
-    eval "$(siberia init)"
-    eval "$(siberia init --age 2w)"
+    eval "$(siberia shellenv)"
+    eval "$(siberia shellenv --age 2w)"
     siberia config --age 14d
     siberia check [files...] [--scan]
 """
@@ -194,10 +194,10 @@ def pnpm_env_overrides(config: AppConfig) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# siberia init
+# siberia shellenv
 # ---------------------------------------------------------------------------
 
-def cmd_init(config: AppConfig, out: TextIO) -> int:
+def cmd_shellenv(config: AppConfig, out: TextIO) -> int:
     lines: list[str] = []
     if config.enable_pip:
         for k, v in pip_env_overrides(config).items():
@@ -544,9 +544,9 @@ def main(
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    init_parser = subparsers.add_parser("init", help="Print shell exports for eval")
-    init_parser.add_argument("--age", type=parse_age, default=None, metavar="DURATION",
-                             help="Minimum package age, e.g. 7d or 2w (default: 7d)")
+    shellenv_parser = subparsers.add_parser("shellenv", help="Print shell exports for eval")
+    shellenv_parser.add_argument("--age", type=parse_age, default=None, metavar="DURATION",
+                                 help="Minimum package age, e.g. 7d or 2w (default: 7d)")
 
     config_parser = subparsers.add_parser("config", help="Write native config files")
     config_parser.add_argument("--age", type=parse_age, default=None, metavar="DURATION",
@@ -569,8 +569,8 @@ def main(
     if args.age is not None:
         config = replace(config, min_age_days=args.age)
 
-    if args.command == "init":
-        return cmd_init(config, active_out)
+    if args.command == "shellenv":
+        return cmd_shellenv(config, active_out)
 
     if args.command == "config":
         home = Path(active_env.get("HOME", str(Path.home())))
