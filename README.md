@@ -133,14 +133,17 @@ eval "$(siberia shellenv --age 14d)"
 eval "$(siberia shellenv --age 2w)"
 ```
 
-This sets:
+By default, `siberia shellenv` exports:
 
 - `PIP_UPLOADED_PRIOR_TO=P7D` — blocks pip and pipx from installing packages younger than 7 days
 - `UV_EXCLUDE_NEWER=P7D` — same for uv and uvx
 - `npm_config_min_release_age=7` — same for npm and npx
-- `npm_config_ignore_scripts=true` — optional npm and npx hardening that blocks dependency lifecycle scripts broadly
 - `pnpm_config_minimum_release_age=10080` — same for pnpm (in minutes)
 - `pnpm_config_block_exotic_subdeps=true` — blocks transitive pnpm dependencies from using exotic sources like git or tarball URLs
+
+Optional exports are included only when their matching config flags are enabled:
+
+- `npm_config_ignore_scripts=true` — optional npm and npx hardening that blocks dependency lifecycle scripts broadly
 - `pnpm_config_strict_dep_builds=true` — optional pnpm hardening that fails installs on unreviewed dependency build scripts
 
 ### `siberia config`
@@ -190,18 +193,13 @@ Exits 1 if any violations are found. Suitable as a CI gate.
 
 ## Installation
 
-Siberia is a single Python file with no dependencies beyond the standard library (Python 3.11+):
-
-```sh
-curl -o siberia https://raw.githubusercontent.com/your-org/siberia/main/siberia
-chmod +x siberia
-```
-
-Or clone the repo and run directly:
+Siberia is a single Python file with no dependencies beyond the standard library (Python 3.11+). In this repo, run it directly:
 
 ```sh
 python3 siberia shellenv
 ```
+
+If you want it on your `PATH`, copy or symlink `siberia` to a directory you already use for local executables.
 
 ---
 
