@@ -348,6 +348,27 @@ class ConfigSubcommandTests(unittest.TestCase):
             content = (home / ".config" / "pnpm" / "rc").read_text()
             self.assertIn("minimum-release-age=10080", content)
 
+    def test_config_writes_pnpm_minimum_release_age_strict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            cmd_config(AppConfig(), home, io.StringIO())
+            content = (home / ".config" / "pnpm" / "rc").read_text()
+            self.assertIn("minimum-release-age-strict=true", content)
+
+    def test_config_writes_pnpm_fail_closed_ignore_missing_time_false_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            cmd_config(AppConfig(), home, io.StringIO())
+            content = (home / ".config" / "pnpm" / "rc").read_text()
+            self.assertIn("minimum-release-age-ignore-missing-time=false", content)
+
+    def test_config_writes_pnpm_fail_open_ignore_missing_time_true(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            cmd_config(AppConfig(fail_closed_on_missing_metadata=False), home, io.StringIO())
+            content = (home / ".config" / "pnpm" / "rc").read_text()
+            self.assertIn("minimum-release-age-ignore-missing-time=true", content)
+
     def test_config_writes_pnpm_block_exotic_subdeps(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -368,6 +389,15 @@ class ConfigSubcommandTests(unittest.TestCase):
             cmd_config(AppConfig(pnpm_strict_dep_builds=True), home, io.StringIO())
             content = (home / ".config" / "pnpm" / "rc").read_text()
             self.assertIn("strict-dep-builds=true", content)
+
+    def test_config_is_idempotent_for_pnpm_rc(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            cmd_config(AppConfig(), home, io.StringIO())
+            cmd_config(AppConfig(), home, io.StringIO())
+            content = (home / ".config" / "pnpm" / "rc").read_text()
+            self.assertEqual(content.count("minimum-release-age-strict"), 1)
+            self.assertEqual(content.count("minimum-release-age-ignore-missing-time"), 1)
 
     def test_config_is_idempotent_for_npmrc(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

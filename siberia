@@ -294,6 +294,12 @@ def cmd_config(config: AppConfig, home: Path, out: TextIO) -> int:
     if config.enable_pnpm:
         p = home / ".config" / "pnpm" / "rc"
         _write_kv_file(p, "minimum-release-age", str(config.min_age_days * 24 * 60))
+        _write_kv_file(p, "minimum-release-age-strict", "true")
+        _write_kv_file(
+            p,
+            "minimum-release-age-ignore-missing-time",
+            "false" if config.fail_closed_on_missing_metadata else "true",
+        )
         if config.pnpm_block_exotic_subdeps:
             _write_kv_file(p, "block-exotic-subdeps", "true")
         if config.pnpm_strict_dep_builds:
