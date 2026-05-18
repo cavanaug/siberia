@@ -22,8 +22,18 @@ from siberia.cli import AppConfig, cmd_config, cmd_shellenv, load_config, main, 
 class PackageImportTests(unittest.TestCase):
     def test_package_cli_module_can_be_imported(self) -> None:
         module = importlib.import_module("siberia.cli")
-        self.assertEqual(module.__version__, "0.1.0")
-        self.assertEqual(__version__, "0.1.0")
+        self.assertEqual(module.__version__, "0.2.0")
+        self.assertEqual(__version__, "0.2.0")
+
+    def test_main_supports_top_level_version_flag(self) -> None:
+        out = io.StringIO()
+        err = io.StringIO()
+
+        rc = main(["--version"], out=out, err=err, env={})
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.getvalue().strip(), "0.2.0")
+        self.assertEqual(err.getvalue(), "")
 
     def test_module_main_remains_callable(self) -> None:
         module = importlib.import_module("siberia.cli")

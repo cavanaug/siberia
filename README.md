@@ -2,7 +2,7 @@
 
 > All new packages are frozen like a cold Siberian winter, but you control the thaw rate...
 
-**Supply-chain hardening for pip, uv, npm, pnpm, and Cargo.**
+**Supply-chain hardening for pip, uv, npm, pnpm, and Cargo lockfile auditing.**
 
 Siberia enforces a minimum-age policy on packages pulled from external repositories. Before a newly published package can enter your
 environment, it must have existed in the registry for at least N days. This one constraint eliminates an entire class of attack.
@@ -195,6 +195,30 @@ Exits 1 if any violations are found. Suitable as a CI gate.
 
 ---
 
+## Why use Siberia instead of setting a few shell variables yourself?
+
+You can set the current `pip`, `uv`, `npm`, and `pnpm` environment variables directly in your shell profile. For an expert who tracks every
+package manager closely, that can work.
+
+Siberia exists because most teams do not want to become experts in each packaging tool's latest security knobs just to get basic protection
+from fast-moving supply-chain attacks.
+
+What Siberia adds beyond a hand-written bash snippet:
+
+- It tracks the native hardening capabilities that each supported tool exposes as those capabilities evolve.
+- It translates one policy into the right native settings for each ecosystem instead of making you memorize different variable names,
+  formats, units, and config file locations.
+- It can write persistent native config, not just shell exports, so the policy still applies in CI, containers, subprocesses, and other
+  environments where your shell RC may never run.
+- It documents the gaps and capability differences between ecosystems so you do not assume they all support the same controls.
+- It gives non-experts a safer default path: use the package managers they already depend on, but with age-based protections configured for
+  them automatically.
+
+The goal is not to replace native package-manager controls. The goal is to keep up with them, normalize them, and configure them correctly
+for people who want the protection without becoming `npm`, `pnpm`, `pip`, or `uv` specialists.
+
+---
+
 ## Installation
 
 ### Persistent install with `uv`
@@ -212,7 +236,7 @@ uvx siberia check --scan
 ### Install from a published GitHub release artifact
 
 ```sh
-uv tool install "https://github.com/cavanaug/siberia/releases/download/v0.1.0/siberia-0.1.0-py3-none-any.whl"
+uv tool install "https://github.com/cavanaug/siberia/releases/download/v0.2.0/siberia-0.2.0-py3-none-any.whl"
 ```
 
 ### Homebrew (macOS)
@@ -280,6 +304,29 @@ The `--age` flag on any subcommand overrides both the config file and environmen
   per-dependency build approvals.
 - `pip` and `uv` currently provide age-based controls, but not the same class of native script-approval or exotic-source restrictions.
 - `npm` and `npx` share the same native npm config surface, so Siberia's npm-native settings affect both tools.
+- `siberia check` also audits `Cargo.lock` against crates.io publish dates, but Siberia does not yet configure Cargo's install behavior the
+  way it configures pip, uv, npm, and pnpm.
+
+---
+
+## Future Directions
+
+Areas that would make Siberia more useful over time:
+
+- Cargo integration beyond lockfile auditing: today `siberia check` can audit `Cargo.lock`, but Siberia does not yet manage Cargo-native
+  install policy. Extending Siberia to configure Rust workflows more directly is a likely next step.
+- Go modules support: add auditing and, where feasible, native policy integration for `go.mod` and `go.sum` workflows.
+- Richer `siberia check` reporting: audit lockfiles against policy and optionally show the age of every resolved dependency, not just
+  violations. That could grow into an explicit CLI mode for lockfile age reporting.
+- Local cache inspection: review already-downloaded package-manager caches such as pnpm stores, npm caches, or Python tool caches and warn
+  when locally available artifacts are newer than the configured age threshold. This would help detect cases where something outside the
+  normal install path populated the cache.
+- Private registry policy: enterprises often need different rules for internal packages than for public internet packages. For example, a
+  company may want no cooling-off period for its private npm registry but still require one for packages from the public npm ecosystem.
+  Handling that cleanly across package managers is still an open problem and needs more research.
+
+Siberia should keep following the ecosystems forward: adopt new native controls when they appear, expose them coherently, and make safe
+defaults accessible to people who are not packaging-tool experts.
 
 ---
 

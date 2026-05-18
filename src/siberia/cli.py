@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import TextIO
 
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 # ---------------------------------------------------------------------------
@@ -710,6 +710,10 @@ def main(
         metavar="DURATION",
         help="Minimum package age, e.g. 7d or 2w (default: 7d)",
     )
+
+    if active_argv == ["--version"]:
+        print(__version__, file=active_out)
+        return 0
 
     args = parser.parse_args(active_argv)
 
