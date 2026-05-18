@@ -1,32 +1,57 @@
 from __future__ import annotations
 
+import importlib
 import io
-import importlib.util
+import os
+import sys
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from unittest.mock import patch
 
-import sys
-import os
-
 ROOT = Path(__file__).resolve().parents[1]
-loader = SourceFileLoader("siberia", str(ROOT / "siberia"))
-spec = importlib.util.spec_from_loader("siberia", loader)
-assert spec is not None and spec.loader is not None
-siberia = importlib.util.module_from_spec(spec)
-sys.modules["siberia"] = siberia
-spec.loader.exec_module(siberia)
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
-from siberia import (
-    AppConfig,
-    load_config,
-    cmd_shellenv,
-    cmd_config,
-    main,
-    parse_age,
-)
+import siberia.cli as siberia
+from siberia import __version__
+from siberia.cli import AppConfig, cmd_config, cmd_shellenv, load_config, main, parse_age
+
+
+class PackageImportTests(unittest.TestCase):
+    def test_package_cli_module_can_be_imported(self) -> None:
+        module = importlib.import_module("siberia.cli")
+        self.assertEqual(module.__version__, "0.1.0")
+        self.assertEqual(__version__, "0.1.0")
+
+    def test_module_main_remains_callable(self) -> None:
+        module = importlib.import_module("siberia.cli")
+        out = io.StringIO()
+        rc = module.main(["shellenv", "--age", "7d"], out=out, err=io.StringIO(), env={})
+        self.assertEqual(rc, 0)
+        self.assertIn("PIP_UPLOADED_PRIOR_TO=P7D", out.getvalue())
+
+
+class PackagingMetadataTests(unittest.TestCase):
+    def test_pyproject_exists(self) -> None:
+        self.assertTrue((ROOT / "pyproject.toml").exists())
+
+
+class WorkflowPresenceTests(unittest.TestCase):
+    def test_ci_workflow_exists(self) -> None:
+        self.assertTrue((ROOT / ".github/workflows/ci.yml").exists())
+
+    def test_release_workflow_exists(self) -> None:
+        self.assertTrue((ROOT / ".github/workflows/release.yml").exists())
+
+
+class ReleaseDocsTests(unittest.TestCase):
+    def test_runner_and_release_runbook_exists(self) -> None:
+        self.assertTrue((ROOT / "docs/superpowers/runbooks/github-runners-and-releases.md").exists())
+
+    def test_homebrew_formula_template_exists(self) -> None:
+        self.assertTrue((ROOT / "docs/homebrew/siberia.rb").exists())
 
 
 class LoadConfigTests(unittest.TestCase):
@@ -271,6 +296,51 @@ class ShellenvSubcommandTests(unittest.TestCase):
 
 
 class ConfigSubcommandTests(unittest.TestCase):
+    def test_config_verbose_lists_all_managed_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            out = io.StringIO()
+            cmd_config(AppConfig(), home, out, verbose=True)
+            content = out.getvalue()
+            self.assertIn("~/.config/pip/pip.conf", content)
+            self.assertIn("[write] global.uploaded-prior-to = P7D", content)
+            self.assertIn("~/.config/uv/uv.toml", content)
+            self.assertIn("[write] exclude-newer = P7D", content)
+            self.assertIn("~/.npmrc", content)
+            self.assertIn("[write] min-release-age = 7", content)
+            self.assertIn("[skip] ignore-scripts (option disabled)", content)
+            self.assertIn("~/.config/pnpm/rc", content)
+            self.assertIn("[write] minimum-release-age = 10080", content)
+            self.assertIn("[write] minimum-release-age-strict = true", content)
+            self.assertIn("[write] minimum-release-age-ignore-missing-time = false", content)
+            self.assertIn("[write] block-exotic-subdeps = true", content)
+            self.assertIn("[skip] strict-dep-builds (option disabled)", content)
+
+    def test_config_verbose_lists_skipped_fields_for_disabled_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            out = io.StringIO()
+            cmd_config(
+                AppConfig(enable_pip=False, enable_npm=False, enable_npx=False, enable_uv=False, enable_pnpm=False),
+                home,
+                out,
+                verbose=True,
+            )
+            content = out.getvalue()
+            self.assertIn("~/.config/pip/pip.conf", content)
+            self.assertIn("[skip] global.uploaded-prior-to (tool disabled)", content)
+            self.assertIn("~/.config/uv/uv.toml", content)
+            self.assertIn("[skip] exclude-newer (tool disabled)", content)
+            self.assertIn("~/.npmrc", content)
+            self.assertIn("[skip] min-release-age (tool disabled)", content)
+            self.assertIn("[skip] ignore-scripts (tool disabled)", content)
+            self.assertIn("~/.config/pnpm/rc", content)
+            self.assertIn("[skip] minimum-release-age (tool disabled)", content)
+            self.assertIn("[skip] minimum-release-age-strict (tool disabled)", content)
+            self.assertIn("[skip] minimum-release-age-ignore-missing-time (tool disabled)", content)
+            self.assertIn("[skip] block-exotic-subdeps (tool disabled)", content)
+            self.assertIn("[skip] strict-dep-builds (tool disabled)", content)
+
     def test_config_writes_pip_conf(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -426,13 +496,13 @@ class ConfigSubcommandTests(unittest.TestCase):
 class MainSubcommandTests(unittest.TestCase):
     def test_main_shellenv_returns_zero(self) -> None:
         out = io.StringIO()
-        with patch("siberia.load_config", return_value=AppConfig()):
+        with patch("siberia.cli.load_config", return_value=AppConfig()):
             rc = main(["shellenv"], out=out)
         self.assertEqual(rc, 0)
 
     def test_main_shellenv_days_flag_overrides_config(self) -> None:
         out = io.StringIO()
-        with patch("siberia.load_config", return_value=AppConfig(min_age_days=7)):
+        with patch("siberia.cli.load_config", return_value=AppConfig(min_age_days=7)):
             rc = main(["shellenv", "--age", "21d"], out=out)
         self.assertEqual(rc, 0)
         self.assertIn("npm_config_min_release_age=21", out.getvalue())
@@ -449,23 +519,31 @@ class MainSubcommandTests(unittest.TestCase):
     def test_main_config_returns_zero(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             out = io.StringIO()
-            with patch("siberia.load_config", return_value=AppConfig()):
+            with patch("siberia.cli.load_config", return_value=AppConfig()):
                 rc = main(["config"], env={"HOME": tmp}, out=out)
             self.assertEqual(rc, 0)
+
+    def test_main_config_verbose_returns_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            with patch("siberia.cli.load_config", return_value=AppConfig()):
+                rc = main(["config", "--verbose"], env={"HOME": tmp}, out=out)
+            self.assertEqual(rc, 0)
+            self.assertIn("[write] global.uploaded-prior-to = P7D", out.getvalue())
 
     def test_main_config_reports_warning_for_explicit_npm_ignore_scripts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             (home / ".npmrc").write_text("ignore-scripts=true\n", encoding="utf-8")
             out = io.StringIO()
-            with patch("siberia.load_config", return_value=AppConfig(npm_ignore_scripts=False)):
+            with patch("siberia.cli.load_config", return_value=AppConfig(npm_ignore_scripts=False)):
                 rc = main(["config"], env={"HOME": tmp}, out=out)
             self.assertEqual(rc, 0)
             self.assertIn("warning:", out.getvalue())
 
     def test_main_exits_one_on_bad_config(self) -> None:
         err = io.StringIO()
-        with patch("siberia.load_config", side_effect=ValueError("bad")):
+        with patch("siberia.cli.load_config", side_effect=ValueError("bad")):
             rc = main(["shellenv"], err=err)
         self.assertEqual(rc, 1)
         self.assertIn("siberia:", err.getvalue())
@@ -554,7 +632,7 @@ class ParseAgeTests(unittest.TestCase):
 
     def test_main_age_weeks_overrides_config(self) -> None:
         out = io.StringIO()
-        with patch("siberia.load_config", return_value=AppConfig(min_age_days=7)):
+        with patch("siberia.cli.load_config", return_value=AppConfig(min_age_days=7)):
             rc = main(["shellenv", "--age", "2w"], out=out)
         self.assertEqual(rc, 0)
         self.assertIn("npm_config_min_release_age=14", out.getvalue())

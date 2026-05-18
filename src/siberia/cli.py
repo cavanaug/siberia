@@ -1,0 +1,739 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import configparser
+import json
+import os
+import re
+import sys
+import tomllib
+import urllib.request
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import TextIO
+
+
+__version__ = "0.1.0"
+
+
+# ---------------------------------------------------------------------------
+# Age parsing
+# ---------------------------------------------------------------------------
+
+_AGE_PATTERN = re.compile(r"^(\d+)\s*(d|day|days|w|week|weeks)?$", re.IGNORECASE)
+
+
+def parse_age(value: str) -> int:
+    """Parse a human-friendly age string into days.
+
+    Accepted formats:
+        7        -> 7 days (bare integer defaults to days)
+        7d       -> 7 days
+        7days    -> 7 days
+        2w       -> 14 days
+        2weeks   -> 14 days
+    """
+    match = _AGE_PATTERN.match(value.strip())
+    if not match:
+        raise argparse.ArgumentTypeError(
+            f"invalid age {value!r}: use an integer (days) or a suffix: 7d, 2w"
+        )
+    n = int(match.group(1))
+    unit = (match.group(2) or "d").lower()
+    if unit.startswith("w"):
+        return n * 7
+    return n
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True, frozen=True)
+class AppConfig:
+    min_age_days: int = 7
+    enable_pip: bool = True
+    enable_npm: bool = True
+    enable_pnpm: bool = True
+    enable_npx: bool = True
+    enable_uv: bool = True
+    fail_closed_on_missing_metadata: bool = True
+    cache_ttl_seconds: int = 3600
+    pnpm_block_exotic_subdeps: bool = True
+    pnpm_strict_dep_builds: bool = False
+    npm_ignore_scripts: bool = False
+
+
+DEFAULT_CONFIG_PATH = Path("~/.config/siberia/config.toml").expanduser()
+
+_BOOL_ENV_VARS: dict[str, str] = {
+    "enable_pip": "SIBERIA_ENABLE_PIP",
+    "enable_npm": "SIBERIA_ENABLE_NPM",
+    "enable_pnpm": "SIBERIA_ENABLE_PNPM",
+    "enable_npx": "SIBERIA_ENABLE_NPX",
+    "enable_uv": "SIBERIA_ENABLE_UV",
+    "fail_closed_on_missing_metadata": "SIBERIA_FAIL_CLOSED_ON_MISSING_METADATA",
+    "pnpm_block_exotic_subdeps": "SIBERIA_PNPM_BLOCK_EXOTIC_SUBDEPS",
+    "pnpm_strict_dep_builds": "SIBERIA_PNPM_STRICT_DEP_BUILDS",
+    "npm_ignore_scripts": "SIBERIA_NPM_IGNORE_SCRIPTS",
+}
+
+_INT_ENV_VARS: dict[str, str] = {
+    "min_age_days": "SIBERIA_MIN_AGE_DAYS",
+    "cache_ttl_seconds": "SIBERIA_CACHE_TTL_SECONDS",
+}
+
+
+def _get_bool(data: dict[str, object], key: str, default: bool) -> bool:
+    value = data.get(key, default)
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"{key} must be a boolean")
+
+
+def _get_int(data: dict[str, object], key: str, default: int) -> int:
+    value = data.get(key, default)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    raise ValueError(f"{key} must be an integer")
+
+
+def _apply_env_overrides(kwargs: dict[str, object], env: Mapping[str, str]) -> None:
+    for field, var in _BOOL_ENV_VARS.items():
+        raw = env.get(var)
+        if raw is None:
+            continue
+        if raw in ("1", "true", "yes"):
+            kwargs[field] = True
+        elif raw in ("0", "false", "no"):
+            kwargs[field] = False
+        else:
+            raise ValueError(f"{var} must be '1'/'true'/'yes' or '0'/'false'/'no', got {raw!r}")
+    for field, var in _INT_ENV_VARS.items():
+        raw = env.get(var)
+        if raw is None:
+            continue
+        try:
+            kwargs[field] = int(raw)
+        except ValueError as exc:
+            raise ValueError(f"{var} must be an integer, got {raw!r}") from exc
+
+
+def load_config(
+    config_path: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> AppConfig:
+    path = config_path or DEFAULT_CONFIG_PATH
+    if not path.exists():
+        kwargs: dict[str, object] = {}
+        if env is not None:
+            _apply_env_overrides(kwargs, env)
+        return AppConfig(**kwargs)  # type: ignore[arg-type]
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    kwargs = {
+        "min_age_days": _get_int(data, "min_age_days", 7),
+        "enable_pip": _get_bool(data, "enable_pip", True),
+        "enable_npm": _get_bool(data, "enable_npm", True),
+        "enable_pnpm": _get_bool(data, "enable_pnpm", True),
+        "enable_npx": _get_bool(data, "enable_npx", True),
+        "enable_uv": _get_bool(data, "enable_uv", True),
+        "fail_closed_on_missing_metadata": _get_bool(data, "fail_closed_on_missing_metadata", True),
+        "cache_ttl_seconds": _get_int(data, "cache_ttl_seconds", 3600),
+        "pnpm_block_exotic_subdeps": _get_bool(data, "pnpm_block_exotic_subdeps", True),
+        "pnpm_strict_dep_builds": _get_bool(data, "pnpm_strict_dep_builds", False),
+        "npm_ignore_scripts": _get_bool(data, "npm_ignore_scripts", False),
+    }
+    if env is not None:
+        _apply_env_overrides(kwargs, env)
+    return AppConfig(**kwargs)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Native env overrides
+# ---------------------------------------------------------------------------
+
+
+def pip_env_overrides(config: AppConfig) -> dict[str, str]:
+    return {"PIP_UPLOADED_PRIOR_TO": f"P{config.min_age_days}D"}
+
+
+def uv_env_overrides(config: AppConfig) -> dict[str, str]:
+    return {"UV_EXCLUDE_NEWER": f"P{config.min_age_days}D"}
+
+
+def npm_env_overrides(config: AppConfig) -> dict[str, str]:
+    env = {"npm_config_min_release_age": str(config.min_age_days)}
+    if config.npm_ignore_scripts:
+        env["npm_config_ignore_scripts"] = "true"
+    return env
+
+
+def pnpm_env_overrides(config: AppConfig) -> dict[str, str]:
+    minutes = config.min_age_days * 24 * 60
+    env = {
+        "pnpm_config_minimum_release_age": str(minutes),
+        "pnpm_config_minimum_release_age_strict": "true",
+        "pnpm_config_minimum_release_age_ignore_missing_time": (
+            "false" if config.fail_closed_on_missing_metadata else "true"
+        ),
+    }
+    if config.pnpm_block_exotic_subdeps:
+        env["pnpm_config_block_exotic_subdeps"] = "true"
+    if config.pnpm_strict_dep_builds:
+        env["pnpm_config_strict_dep_builds"] = "true"
+    return env
+
+
+# ---------------------------------------------------------------------------
+# siberia shellenv
+# ---------------------------------------------------------------------------
+
+
+def cmd_shellenv(config: AppConfig, out: TextIO) -> int:
+    lines: list[str] = []
+    if config.enable_pip:
+        for key, value in pip_env_overrides(config).items():
+            lines.append(f"export {key}={value}")
+    if config.enable_uv:
+        for key, value in uv_env_overrides(config).items():
+            lines.append(f"export {key}={value}")
+    if config.enable_npm or config.enable_npx:
+        for key, value in npm_env_overrides(config).items():
+            lines.append(f"export {key}={value}")
+    if config.enable_pnpm:
+        for key, value in pnpm_env_overrides(config).items():
+            lines.append(f"export {key}={value}")
+    print("\n".join(lines), file=out)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# siberia config
+# ---------------------------------------------------------------------------
+
+
+def _write_ini_section(path: Path, section: str, key: str, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parser = configparser.RawConfigParser()
+    if path.exists():
+        parser.read(path, encoding="utf-8")
+    if not parser.has_section(section):
+        parser.add_section(section)
+    parser.set(section, key, value)
+    with path.open("w", encoding="utf-8") as handle:
+        parser.write(handle)
+
+
+def _write_toml_key(path: Path, key: str, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    found = False
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip().startswith(key) and "=" in line:
+                lines.append(f'{key} = "{value}"')
+                found = True
+            else:
+                lines.append(line)
+    if not found:
+        lines.append(f'{key} = "{value}"')
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_kv_file(path: Path, key: str, value: str) -> None:
+    """Idempotently set key=value in a .npmrc-style key=value file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    found = False
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith(f"{key}=") or line.startswith(f"{key} ="):
+                lines.append(f"{key}={value}")
+                found = True
+            else:
+                lines.append(line)
+    if not found:
+        lines.append(f"{key}={value}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _read_kv_value(path: Path, key: str) -> str | None:
+    if not path.exists():
+        return None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith(f"{key}=") or line.startswith(f"{key} ="):
+            return line.split("=", 1)[1].strip()
+    return None
+
+
+def _verbose_config_line(
+    lines_by_path: dict[str, list[str]],
+    home: Path,
+    path: Path,
+    status: str,
+    field: str,
+    detail: str,
+) -> None:
+    display_path = str(path).replace(str(home), "~", 1) if str(path).startswith(str(home)) else str(path)
+    lines_by_path.setdefault(display_path, []).append(f"[{status}] {field}{detail}")
+
+
+def _print_verbose_config_report(lines_by_path: dict[str, list[str]], out: TextIO) -> None:
+    for display_path, lines in lines_by_path.items():
+        print(display_path, file=out)
+        for line in lines:
+            print(f"  {line}", file=out)
+
+
+def cmd_config(config: AppConfig, home: Path, out: TextIO, verbose: bool = False) -> int:
+    written: list[str] = []
+    verbose_lines: dict[str, list[str]] = {}
+    pip_path = home / ".config" / "pip" / "pip.conf"
+    uv_path = home / ".config" / "uv" / "uv.toml"
+    npm_path = home / ".npmrc"
+    pnpm_path = home / ".config" / "pnpm" / "rc"
+
+    if config.enable_pip:
+        _write_ini_section(pip_path, "global", "uploaded-prior-to", f"P{config.min_age_days}D")
+        written.append(str(pip_path))
+        if verbose:
+            _verbose_config_line(
+                verbose_lines,
+                home,
+                pip_path,
+                "write",
+                "global.uploaded-prior-to",
+                f" = P{config.min_age_days}D",
+            )
+    elif verbose:
+        _verbose_config_line(verbose_lines, home, pip_path, "skip", "global.uploaded-prior-to", " (tool disabled)")
+
+    if config.enable_uv:
+        _write_toml_key(uv_path, "exclude-newer", f"P{config.min_age_days}D")
+        written.append(str(uv_path))
+        if verbose:
+            _verbose_config_line(
+                verbose_lines,
+                home,
+                uv_path,
+                "write",
+                "exclude-newer",
+                f" = P{config.min_age_days}D",
+            )
+    elif verbose:
+        _verbose_config_line(verbose_lines, home, uv_path, "skip", "exclude-newer", " (tool disabled)")
+
+    if config.enable_npm or config.enable_npx:
+        _write_kv_file(npm_path, "min-release-age", str(config.min_age_days))
+        if verbose:
+            _verbose_config_line(
+                verbose_lines,
+                home,
+                npm_path,
+                "write",
+                "min-release-age",
+                f" = {config.min_age_days}",
+            )
+        if config.npm_ignore_scripts:
+            _write_kv_file(npm_path, "ignore-scripts", "true")
+            if verbose:
+                _verbose_config_line(verbose_lines, home, npm_path, "write", "ignore-scripts", " = true")
+        elif _read_kv_value(npm_path, "ignore-scripts") is not None:
+            print("warning: leaving explicit ignore-scripts setting unchanged in ~/.npmrc", file=out)
+            if verbose:
+                _verbose_config_line(
+                    verbose_lines,
+                    home,
+                    npm_path,
+                    "skip",
+                    "ignore-scripts",
+                    " (explicit user setting left unchanged)",
+                )
+        elif verbose:
+            _verbose_config_line(verbose_lines, home, npm_path, "skip", "ignore-scripts", " (option disabled)")
+        written.append(str(npm_path))
+    elif verbose:
+        _verbose_config_line(verbose_lines, home, npm_path, "skip", "min-release-age", " (tool disabled)")
+        _verbose_config_line(verbose_lines, home, npm_path, "skip", "ignore-scripts", " (tool disabled)")
+
+    if config.enable_pnpm:
+        _write_kv_file(pnpm_path, "minimum-release-age", str(config.min_age_days * 24 * 60))
+        _write_kv_file(pnpm_path, "minimum-release-age-strict", "true")
+        _write_kv_file(
+            pnpm_path,
+            "minimum-release-age-ignore-missing-time",
+            "false" if config.fail_closed_on_missing_metadata else "true",
+        )
+        if verbose:
+            _verbose_config_line(
+                verbose_lines,
+                home,
+                pnpm_path,
+                "write",
+                "minimum-release-age",
+                f" = {config.min_age_days * 24 * 60}",
+            )
+            _verbose_config_line(
+                verbose_lines,
+                home,
+                pnpm_path,
+                "write",
+                "minimum-release-age-strict",
+                " = true",
+            )
+            _verbose_config_line(
+                verbose_lines,
+                home,
+                pnpm_path,
+                "write",
+                "minimum-release-age-ignore-missing-time",
+                " = false" if config.fail_closed_on_missing_metadata else " = true",
+            )
+        if config.pnpm_block_exotic_subdeps:
+            _write_kv_file(pnpm_path, "block-exotic-subdeps", "true")
+            if verbose:
+                _verbose_config_line(verbose_lines, home, pnpm_path, "write", "block-exotic-subdeps", " = true")
+        elif verbose:
+            _verbose_config_line(verbose_lines, home, pnpm_path, "skip", "block-exotic-subdeps", " (option disabled)")
+        if config.pnpm_strict_dep_builds:
+            _write_kv_file(pnpm_path, "strict-dep-builds", "true")
+            if verbose:
+                _verbose_config_line(verbose_lines, home, pnpm_path, "write", "strict-dep-builds", " = true")
+        elif verbose:
+            _verbose_config_line(verbose_lines, home, pnpm_path, "skip", "strict-dep-builds", " (option disabled)")
+        written.append(str(pnpm_path))
+    elif verbose:
+        _verbose_config_line(verbose_lines, home, pnpm_path, "skip", "minimum-release-age", " (tool disabled)")
+        _verbose_config_line(verbose_lines, home, pnpm_path, "skip", "minimum-release-age-strict", " (tool disabled)")
+        _verbose_config_line(
+            verbose_lines,
+            home,
+            pnpm_path,
+            "skip",
+            "minimum-release-age-ignore-missing-time",
+            " (tool disabled)",
+        )
+        _verbose_config_line(verbose_lines, home, pnpm_path, "skip", "block-exotic-subdeps", " (tool disabled)")
+        _verbose_config_line(verbose_lines, home, pnpm_path, "skip", "strict-dep-builds", " (tool disabled)")
+
+    if verbose:
+        _print_verbose_config_report(verbose_lines, out)
+
+    for path in written:
+        print(f"wrote {path}", file=out)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# siberia check
+# ---------------------------------------------------------------------------
+
+
+class Violation:
+    __slots__ = ("file", "package", "version", "published_at", "age_days", "threshold_days")
+
+    def __init__(
+        self,
+        file: Path,
+        package: str,
+        version: str,
+        published_at: datetime,
+        age_days: float,
+        threshold_days: int,
+    ) -> None:
+        self.file = file
+        self.package = package
+        self.version = version
+        self.published_at = published_at
+        self.age_days = age_days
+        self.threshold_days = threshold_days
+
+    def __str__(self) -> str:
+        return (
+            f"{self.file}: {self.package}@{self.version} published "
+            f"{self.published_at.strftime('%Y-%m-%d')} "
+            f"({self.age_days:.1f} days ago, threshold {self.threshold_days}d)"
+        )
+
+
+def _http_get_json(url: str) -> dict:
+    with urllib.request.urlopen(url, timeout=10) as response:
+        return json.loads(response.read().decode())
+
+
+def _npm_published_at(package: str, version: str) -> datetime | None:
+    try:
+        data = _http_get_json(f"https://registry.npmjs.org/{package}")
+        timestamp = data.get("time", {}).get(version)
+        if timestamp:
+            return datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except Exception:
+        pass
+    return None
+
+
+def _pypi_published_at(package: str, version: str) -> datetime | None:
+    try:
+        data = _http_get_json(f"https://pypi.org/pypi/{package}/{version}/json")
+        for url in data.get("urls", []):
+            timestamp = url.get("upload_time_iso_8601") or url.get("upload_time")
+            if timestamp:
+                return datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except Exception:
+        pass
+    return None
+
+
+def _crates_published_at(package: str, version: str) -> datetime | None:
+    try:
+        data = _http_get_json(f"https://crates.io/api/v1/crates/{package}/{version}")
+        timestamp = data.get("version", {}).get("created_at")
+        if timestamp:
+            return datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except Exception:
+        pass
+    return None
+
+
+def _check_package_lock(path: Path, threshold_days: int, now: datetime) -> list[Violation]:
+    violations: list[Violation] = []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return violations
+    for node_path, info in data.get("packages", {}).items():
+        if not node_path:
+            continue
+        name = info.get("name") or node_path.split("node_modules/")[-1]
+        version = info.get("version", "")
+        if not version:
+            continue
+        published_at = _npm_published_at(name, version)
+        if published_at is None:
+            continue
+        age = (now - published_at).total_seconds() / 86400
+        if age < threshold_days:
+            violations.append(Violation(path, name, version, published_at, age, threshold_days))
+    return violations
+
+
+def _check_pnpm_lock(path: Path, threshold_days: int, now: datetime) -> list[Violation]:
+    violations: list[Violation] = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return violations
+    seen: set[tuple[str, str]] = set()
+    for match in re.finditer(r"^\s+/?([^@\s/][^@\s]*?)@([^\s:]+):", text, re.MULTILINE):
+        name, version = match.group(1), match.group(2)
+        if (name, version) in seen:
+            continue
+        seen.add((name, version))
+        published_at = _npm_published_at(name, version)
+        if published_at is None:
+            continue
+        age = (now - published_at).total_seconds() / 86400
+        if age < threshold_days:
+            violations.append(Violation(path, name, version, published_at, age, threshold_days))
+    return violations
+
+
+def _check_requirements_txt(path: Path, threshold_days: int, now: datetime) -> list[Violation]:
+    violations: list[Violation] = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return violations
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = re.match(r"^([A-Za-z0-9_.-]+)==([^\s;]+)", line)
+        if not match:
+            continue
+        name, version = match.group(1), match.group(2)
+        published_at = _pypi_published_at(name, version)
+        if published_at is None:
+            continue
+        age = (now - published_at).total_seconds() / 86400
+        if age < threshold_days:
+            violations.append(Violation(path, name, version, published_at, age, threshold_days))
+    return violations
+
+
+def _check_cargo_lock(path: Path, threshold_days: int, now: datetime) -> list[Violation]:
+    violations: list[Violation] = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return violations
+    current: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if line == "[[package]]":
+            current = {}
+        elif line.startswith("name = "):
+            current["name"] = line.split("=", 1)[1].strip().strip('"')
+        elif line.startswith("version = "):
+            current["version"] = line.split("=", 1)[1].strip().strip('"')
+        elif line == "" and "name" in current and "version" in current:
+            published_at = _crates_published_at(current["name"], current["version"])
+            if published_at is not None:
+                age = (now - published_at).total_seconds() / 86400
+                if age < threshold_days:
+                    violations.append(
+                        Violation(
+                            path,
+                            current["name"],
+                            current["version"],
+                            published_at,
+                            age,
+                            threshold_days,
+                        )
+                    )
+            current = {}
+    return violations
+
+
+_LOCKFILE_CHECKERS = {
+    "package-lock.json": _check_package_lock,
+    "pnpm-lock.yaml": _check_pnpm_lock,
+    "requirements.txt": _check_requirements_txt,
+    "Cargo.lock": _check_cargo_lock,
+}
+
+
+def cmd_check(
+    config: AppConfig,
+    files: list[str],
+    scan: bool,
+    out: TextIO,
+    err: TextIO,
+) -> int:
+    now = datetime.now(timezone.utc)
+    threshold = config.min_age_days
+
+    if scan:
+        targets = sorted(path for name in _LOCKFILE_CHECKERS for path in Path(".").rglob(name))
+    elif files:
+        targets = [Path(path) for path in files]
+    else:
+        targets = [Path(name) for name in _LOCKFILE_CHECKERS if Path(name).exists()]
+
+    if not targets:
+        print("siberia check: no lockfiles found", file=err)
+        return 0
+
+    all_violations: list[Violation] = []
+    for target in targets:
+        checker = _LOCKFILE_CHECKERS.get(target.name)
+        if checker is None:
+            print(f"siberia check: unsupported file type: {target}", file=err)
+            continue
+        if not target.exists():
+            print(f"siberia check: file not found: {target}", file=err)
+            continue
+        all_violations.extend(checker(target, threshold, now))
+
+    for violation in all_violations:
+        print(f"VIOLATION: {violation}", file=out)
+
+    if all_violations:
+        print(
+            f"\nsiberia check: {len(all_violations)} violation(s) found "
+            f"(threshold: {threshold} days)",
+            file=err,
+        )
+        return 1
+
+    print(f"siberia check: all packages meet the {threshold}-day age requirement", file=out)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+
+def main(
+    argv: list[str] | None = None,
+    env: Mapping[str, str] | None = None,
+    out: TextIO | None = None,
+    err: TextIO | None = None,
+) -> int:
+    active_argv = argv if argv is not None else sys.argv[1:]
+    active_env = env if env is not None else dict(os.environ)
+    active_out = out if out is not None else sys.stdout
+    active_err = err if err is not None else sys.stderr
+
+    parser = argparse.ArgumentParser(
+        prog="siberia",
+        description="Supply-chain age policy enforcer",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    shellenv_parser = subparsers.add_parser("shellenv", help="Print shell exports for eval")
+    shellenv_parser.add_argument(
+        "--age",
+        type=parse_age,
+        default=None,
+        metavar="DURATION",
+        help="Minimum package age, e.g. 7d or 2w (default: 7d)",
+    )
+
+    config_parser = subparsers.add_parser("config", help="Write native config files")
+    config_parser.add_argument(
+        "--age",
+        type=parse_age,
+        default=None,
+        metavar="DURATION",
+        help="Minimum package age, e.g. 7d or 2w (default: 7d)",
+    )
+    config_parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="List managed config fields and whether they were injected",
+    )
+
+    check_parser = subparsers.add_parser("check", help="Audit lockfiles for too-new packages")
+    check_parser.add_argument("files", nargs="*", help="Lockfiles to check")
+    check_parser.add_argument("--scan", action="store_true", help="Recursively scan for lockfiles")
+    check_parser.add_argument(
+        "--age",
+        type=parse_age,
+        default=None,
+        metavar="DURATION",
+        help="Minimum package age, e.g. 7d or 2w (default: 7d)",
+    )
+
+    args = parser.parse_args(active_argv)
+
+    try:
+        config = load_config(env=active_env)
+    except ValueError as exc:
+        print(f"siberia: {exc}", file=active_err)
+        return 1
+
+    if args.age is not None:
+        config = replace(config, min_age_days=args.age)
+
+    if args.command == "shellenv":
+        return cmd_shellenv(config, active_out)
+
+    if args.command == "config":
+        home = Path(active_env.get("HOME", str(Path.home())))
+        return cmd_config(config, home, active_out, verbose=args.verbose)
+
+    if args.command == "check":
+        return cmd_check(config, args.files, args.scan, active_out, active_err)
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -154,9 +154,13 @@ sourced (CI, Docker, subprocess invocations):
 ```sh
 siberia config
 siberia config --age 14d
+siberia config --verbose
 ```
 
 Writes to: `~/.config/pip/pip.conf`, `~/.config/uv/uv.toml`, `~/.npmrc`, `~/.config/pnpm/rc`. All writes are idempotent.
+
+Use `-v` / `--verbose` to list the managed config fields grouped by target file, including both injected values and fields skipped because a
+tool or option is disabled.
 
 Additional hardening written by `siberia config`:
 
@@ -193,13 +197,47 @@ Exits 1 if any violations are found. Suitable as a CI gate.
 
 ## Installation
 
-Siberia is a single Python file with no dependencies beyond the standard library (Python 3.11+). In this repo, run it directly:
+### Persistent install with `uv`
+
+```sh
+uv tool install siberia
+```
+
+### One-shot use with `uvx`
+
+```sh
+uvx siberia check --scan
+```
+
+### Install from a published GitHub release artifact
+
+```sh
+uv tool install "https://github.com/cavanaug/siberia/releases/download/v0.1.0/siberia-0.1.0-py3-none-any.whl"
+```
+
+### Homebrew (macOS)
+
+```sh
+brew install cavanaug/tap/siberia
+```
+
+GitHub Releases are the canonical published artifacts. Other distribution channels should consume those tagged releases rather than rebuilding their own package.
+
+### From this repo
 
 ```sh
 python3 siberia shellenv
 ```
 
-If you want it on your `PATH`, copy or symlink `siberia` to a directory you already use for local executables.
+CI and release automation run on standard GitHub-hosted runners. No self-hosted runner setup is required for normal testing, build validation, or tagged release publication.
+
+## Releasing
+
+Tagging `vX.Y.Z` on `master` runs the GitHub-hosted release workflow, builds the wheel and sdist once, and publishes those files as the canonical assets on the GitHub Release page.
+
+Downstream channels such as Homebrew and any later PyPI publish step should consume those published artifacts instead of rebuilding.
+
+Maintainer setup and release steps live in `docs/superpowers/runbooks/github-runners-and-releases.md`, and the Homebrew formula template lives in `docs/homebrew/siberia.rb`.
 
 ---
 
