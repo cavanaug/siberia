@@ -1,1 +1,5 @@
 .worktrees/
+/.agents/skills
+/.bg-shell
+/.gsd
+/__pycache__
