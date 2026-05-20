@@ -248,7 +248,7 @@ uvx siberia check --scan
 ### Install from a published GitHub release artifact
 
 ```sh
-uv tool install "https://github.com/cavanaug/siberia/releases/download/v0.3.0/siberia-0.3.0-py3-none-any.whl"
+uv tool install "https://github.com/cavanaug/siberia/releases/download/v0.4.0/siberia-0.4.0-py3-none-any.whl"
 ```
 
 ### Homebrew (macOS)

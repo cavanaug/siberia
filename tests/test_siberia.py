@@ -3,9 +3,11 @@ from __future__ import annotations
 import importlib
 import io
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,11 +21,36 @@ from siberia import __version__
 from siberia.cli import AppConfig, cmd_config, cmd_shellenv, load_config, main, parse_age
 
 
+class TtyStringIO(io.StringIO):
+    def __init__(self, *, is_tty: bool) -> None:
+        super().__init__()
+        self._is_tty = is_tty
+
+    def isatty(self) -> bool:
+        return self._is_tty
+
+
 class PackageImportTests(unittest.TestCase):
     def test_package_cli_module_can_be_imported(self) -> None:
         module = importlib.import_module("siberia.cli")
-        self.assertEqual(module.__version__, "0.3.0")
-        self.assertEqual(__version__, "0.3.0")
+        self.assertEqual(module.__version__, "0.4.0")
+        self.assertEqual(__version__, "0.4.0")
+
+    def test_importing_package_does_not_preload_cli_module(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys, siberia; print(siberia.__version__); print('siberia.cli' in sys.modules)",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=str(ROOT),
+            env={**os.environ, "PYTHONPATH": str(SRC)},
+            check=True,
+        )
+
+        self.assertEqual(result.stdout.splitlines(), ["0.4.0", "False"])
 
     def test_main_supports_top_level_version_flag(self) -> None:
         out = io.StringIO()
@@ -32,7 +59,7 @@ class PackageImportTests(unittest.TestCase):
         rc = main(["--version"], out=out, err=err, env={})
 
         self.assertEqual(rc, 0)
-        self.assertEqual(out.getvalue().strip(), "0.3.0")
+        self.assertEqual(out.getvalue().strip(), "0.4.0")
         self.assertEqual(err.getvalue(), "")
 
     def test_module_main_remains_callable(self) -> None:
@@ -70,6 +97,13 @@ class LoadConfigTests(unittest.TestCase):
             siberia.DEFAULT_CONFIG_PATH,
             Path("~/.config/siberia/config.toml").expanduser(),
         )
+
+    def test_check_cache_path_uses_xdg_cache_home(self) -> None:
+        with patch.dict(os.environ, {"XDG_CACHE_HOME": "/tmp/siberia-cache-home"}, clear=False):
+            reloaded = importlib.reload(siberia)
+
+        self.assertEqual(reloaded._CHECK_CACHE_PATH, Path("/tmp/siberia-cache-home/siberia/check-cache.json"))
+        importlib.reload(reloaded)
 
     def test_load_config_returns_defaults_when_file_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -310,7 +344,7 @@ class ConfigSubcommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             out = io.StringIO()
-            cmd_config(AppConfig(), home, out, verbose=True)
+            cmd_config(AppConfig(), home, out, verbosity=1)
             content = out.getvalue()
             self.assertIn("~/.config/pip/pip.conf", content)
             self.assertIn("[write] global.uploaded-prior-to = P7D", content)
@@ -334,7 +368,7 @@ class ConfigSubcommandTests(unittest.TestCase):
                 AppConfig(enable_pip=False, enable_npm=False, enable_npx=False, enable_uv=False, enable_pnpm=False),
                 home,
                 out,
-                verbose=True,
+                verbosity=1,
             )
             content = out.getvalue()
             self.assertIn("~/.config/pip/pip.conf", content)
@@ -541,6 +575,71 @@ class MainSubcommandTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn("[write] global.uploaded-prior-to = P7D", out.getvalue())
 
+    def test_main_config_accepts_counted_verbose_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            with patch("siberia.cli.load_config", return_value=AppConfig()):
+                rc = main(["config", "-vv"], env={"HOME": tmp}, out=out)
+            self.assertEqual(rc, 0)
+            self.assertIn("[write] global.uploaded-prior-to = P7D", out.getvalue())
+
+    def test_main_check_accepts_counted_verbose_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            lockfile = Path(tmp) / "uv.lock"
+            lockfile.write_text(
+                "\n".join([
+                    "version = 1",
+                    "",
+                    "[[package]]",
+                    'name = "urllib3"',
+                    'version = "2.2.1"',
+                    'source = { registry = "https://pypi.org/simple" }',
+                ]),
+                encoding="utf-8",
+            )
+            out = io.StringIO()
+            err = io.StringIO()
+            now = siberia.datetime(2026, 5, 20, tzinfo=siberia.timezone.utc)
+
+            with patch("siberia.cli.datetime") as mocked_datetime:
+                mocked_datetime.now.return_value = now
+                mocked_datetime.side_effect = lambda *args, **kwargs: siberia.datetime(*args, **kwargs)
+                mocked_datetime.fromisoformat.side_effect = siberia.datetime.fromisoformat
+                with patch("siberia.cli.load_config", return_value=AppConfig()):
+                    with patch("siberia.cli._pypi_published_at", return_value=now):
+                        rc = main(["check", "-vv", str(lockfile)], out=out, err=err, env={})
+
+        self.assertEqual(rc, 1)
+        self.assertIn("check: starting", err.getvalue())
+
+    def test_main_check_accepts_use_ctime_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            lockfile = Path(tmp) / "uv.lock"
+            lockfile.write_text(
+                "\n".join([
+                    "version = 1",
+                    "",
+                    "[[package]]",
+                    'name = "urllib3"',
+                    'version = "2.2.1"',
+                    'source = { registry = "https://pypi.org/simple" }',
+                ]),
+                encoding="utf-8",
+            )
+            out = io.StringIO()
+            err = io.StringIO()
+            now = siberia.datetime(2026, 5, 20, tzinfo=siberia.timezone.utc)
+
+            with patch("siberia.cli.datetime") as mocked_datetime:
+                mocked_datetime.now.return_value = now
+                mocked_datetime.side_effect = lambda *args, **kwargs: siberia.datetime(*args, **kwargs)
+                mocked_datetime.fromisoformat.side_effect = siberia.datetime.fromisoformat
+                with patch("siberia.cli.load_config", return_value=AppConfig()):
+                    with patch("siberia.cli._pypi_published_at", return_value=now):
+                        rc = main(["check", "--use-ctime", str(lockfile)], out=out, err=err, env={})
+
+        self.assertEqual(rc, 1)
+
     def test_main_config_reports_warning_for_explicit_npm_ignore_scripts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -734,6 +833,7 @@ class CheckCommandTests(unittest.TestCase):
             with patch("siberia.cli.datetime") as mocked_datetime:
                 mocked_datetime.now.return_value = now
                 mocked_datetime.side_effect = lambda *args, **kwargs: siberia.datetime(*args, **kwargs)
+                mocked_datetime.fromisoformat.side_effect = siberia.datetime.fromisoformat
                 with patch("siberia.cli._pypi_published_at", return_value=now):
                     cwd = os.getcwd()
                     try:
@@ -744,6 +844,417 @@ class CheckCommandTests(unittest.TestCase):
 
         self.assertEqual(rc, 1)
         self.assertIn("VIOLATION:", out.getvalue())
+
+    def test_cmd_check_scan_discovers_candidates_in_one_walk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lockfile = root / "uv.lock"
+            lockfile.write_text(
+                "\n".join([
+                    "version = 1",
+                    "",
+                    "[[package]]",
+                    'name = "urllib3"',
+                    'version = "2.2.1"',
+                    'source = { registry = "https://pypi.org/simple" }',
+                ]),
+                encoding="utf-8",
+            )
+            out = io.StringIO()
+            err = io.StringIO()
+            now = siberia.datetime(2026, 5, 20, tzinfo=siberia.timezone.utc)
+
+            with patch("siberia.cli.datetime") as mocked_datetime:
+                mocked_datetime.now.return_value = now
+                mocked_datetime.side_effect = lambda *args, **kwargs: siberia.datetime(*args, **kwargs)
+                mocked_datetime.fromisoformat.side_effect = siberia.datetime.fromisoformat
+                with patch(
+                    "siberia.cli.os.walk",
+                    return_value=[
+                        (str(root), ["nested"], ["uv.lock", "notes.txt"]),
+                        (str(root / "nested"), [], ["bun.lock", "package-lock.json", "random.lock"]),
+                    ],
+                ) as mocked_walk:
+                    with patch("pathlib.Path.rglob", side_effect=AssertionError("rglob should not be used")):
+                        with patch("siberia.cli._pypi_published_at", return_value=now):
+                            with patch("siberia.cli._npm_published_at", return_value=None):
+                                cwd = os.getcwd()
+                                try:
+                                    os.chdir(root)
+                                    rc = siberia.cmd_check(AppConfig(), [], True, out, err)
+                                finally:
+                                    os.chdir(cwd)
+
+        self.assertEqual(rc, 1)
+        mocked_walk.assert_called_once()
+        self.assertIn("VIOLATION:", out.getvalue())
+
+    def test_cmd_check_reports_ok_per_file_on_non_tty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lockfile = root / "uv.lock"
+            lockfile.write_text(
+                "\n".join([
+                    "version = 1",
+                    "",
+                    "[[package]]",
+                    'name = "urllib3"',
+                    'version = "2.2.1"',
+                    'source = { registry = "https://pypi.org/simple" }',
+                ]),
+                encoding="utf-8",
+            )
+            out = TtyStringIO(is_tty=False)
+            err = io.StringIO()
+            now = siberia.datetime(2026, 5, 20, tzinfo=siberia.timezone.utc)
+
+            with patch("siberia.cli.datetime") as mocked_datetime:
+                mocked_datetime.now.return_value = now
+                mocked_datetime.side_effect = lambda *args, **kwargs: siberia.datetime(*args, **kwargs)
+                mocked_datetime.fromisoformat.side_effect = siberia.datetime.fromisoformat
+                with patch("siberia.cli._pypi_published_at", return_value=now - timedelta(days=30)):
+                    rc = siberia.cmd_check(AppConfig(), [str(lockfile)], False, out, err)
+
+        self.assertEqual(rc, 0)
+        self.assertIn(f"OK {lockfile}", out.getvalue())
+
+    def test_cmd_check_reports_failure_per_file_on_non_tty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lockfile = root / "uv.lock"
+            lockfile.write_text(
+                "\n".join([
+                    "version = 1",
+                    "",
+                    "[[package]]",
+                    'name = "urllib3"',
+                    'version = "2.2.1"',
+                    'source = { registry = "https://pypi.org/simple" }',
+                ]),
+                encoding="utf-8",
+            )
+            out = TtyStringIO(is_tty=False)
+            err = io.StringIO()
+            now = siberia.datetime(2026, 5, 20, tzinfo=siberia.timezone.utc)
+
+            with patch("siberia.cli.datetime") as mocked_datetime:
+                mocked_datetime.now.return_value = now
+                mocked_datetime.side_effect = lambda *args, **kwargs: siberia.datetime(*args, **kwargs)
+                mocked_datetime.fromisoformat.side_effect = siberia.datetime.fromisoformat
+                with patch("siberia.cli._pypi_published_at", return_value=now):
+                    rc = siberia.cmd_check(AppConfig(), [str(lockfile)], False, out, err)
+
+        self.assertEqual(rc, 1)
+        self.assertIn(f"X {lockfile}", out.getvalue())
+        self.assertIn("VIOLATION:", out.getvalue())
+
+    def test_cmd_check_reports_unicode_status_on_tty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ok_lockfile = root / "uv.lock"
+            bad_lockfile = root / "Pipfile.lock"
+            ok_lockfile.write_text(
+                "\n".join([
+                    "version = 1",
+                    "",
+                    "[[package]]",
+                    'name = "urllib3"',
+                    'version = "2.2.1"',
+                    'source = { registry = "https://pypi.org/simple" }',
+                ]),
+                encoding="utf-8",
+            )
+            bad_lockfile.write_text(
+                """
+                {
+                  "default": {
+                    "requests": {"version": "==2.32.3"}
+                  },
+                  "develop": {}
+                }
+                """,
+                encoding="utf-8",
+            )
+            out = TtyStringIO(is_tty=True)
+            err = io.StringIO()
+            now = siberia.datetime(2026, 5, 20, tzinfo=siberia.timezone.utc)
+
+            def fake_pypi(package: str, version: str) -> siberia.datetime:
+                if package == "urllib3":
+                    return now - timedelta(days=30)
+                return now
+
+            with patch("siberia.cli.datetime") as mocked_datetime:
+                mocked_datetime.now.return_value = now
+                mocked_datetime.side_effect = lambda *args, **kwargs: siberia.datetime(*args, **kwargs)
+                mocked_datetime.fromisoformat.side_effect = siberia.datetime.fromisoformat
+                with patch("siberia.cli._pypi_published_at", side_effect=fake_pypi):
+                    rc = siberia.cmd_check(AppConfig(), [str(ok_lockfile), str(bad_lockfile)], False, out, err)
+
+        self.assertEqual(rc, 1)
+        self.assertIn(f"\x1b[32m✓ {ok_lockfile}\x1b[0m", out.getvalue())
+        self.assertIn(f"\x1b[31m✗ {bad_lockfile}\x1b[0m", out.getvalue())
+
+    def test_cmd_check_verbose_level_one_logs_discovery_and_start(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lockfile = root / "uv.lock"
+            lockfile.write_text(
+                "\n".join([
+                    "version = 1",
+                    "",
+                    "[[package]]",
+                    'name = "urllib3"',
+                    'version = "2.2.1"',
+                    'source = { registry = "https://pypi.org/simple" }',
+                ]),
+                encoding="utf-8",
+            )
+            out = io.StringIO()
+            err = io.StringIO()
+            now = siberia.datetime(2026, 5, 20, tzinfo=siberia.timezone.utc)
+
+            with patch("siberia.cli.datetime") as mocked_datetime:
+                mocked_datetime.now.return_value = now
+                mocked_datetime.side_effect = lambda *args, **kwargs: siberia.datetime(*args, **kwargs)
+                mocked_datetime.fromisoformat.side_effect = siberia.datetime.fromisoformat
+                with patch("siberia.cli._pypi_published_at", return_value=now):
+                    cwd = os.getcwd()
+                    try:
+                        os.chdir(root)
+                        rc = siberia.cmd_check(AppConfig(), [], True, out, err, verbosity=1)
+                    finally:
+                        os.chdir(cwd)
+
+        self.assertEqual(rc, 1)
+        self.assertIn("scan: discovered 1 supported lockfiles", err.getvalue())
+        self.assertIn(f"check: starting {lockfile.name}", err.getvalue())
+
+    def test_cmd_check_verbose_level_two_logs_elapsed_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lockfile = root / "uv.lock"
+            lockfile.write_text(
+                "\n".join([
+                    "version = 1",
+                    "",
+                    "[[package]]",
+                    'name = "urllib3"',
+                    'version = "2.2.1"',
+                    'source = { registry = "https://pypi.org/simple" }',
+                ]),
+                encoding="utf-8",
+            )
+            out = io.StringIO()
+            err = io.StringIO()
+            now = siberia.datetime(2026, 5, 20, tzinfo=siberia.timezone.utc)
+
+            with patch("siberia.cli.datetime") as mocked_datetime:
+                mocked_datetime.now.return_value = now
+                mocked_datetime.side_effect = lambda *args, **kwargs: siberia.datetime(*args, **kwargs)
+                mocked_datetime.fromisoformat.side_effect = siberia.datetime.fromisoformat
+                with patch("siberia.cli.time.perf_counter", side_effect=[1.0, 1.25]):
+                    with patch("siberia.cli._pypi_published_at", return_value=now):
+                        rc = siberia.cmd_check(AppConfig(), [str(lockfile)], False, out, err, verbosity=2)
+
+        self.assertEqual(rc, 1)
+        self.assertIn("check: finished", err.getvalue())
+        self.assertIn("0.25s", err.getvalue())
+
+    def test_cmd_check_verbose_level_three_logs_package_lookups(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lockfile = root / "uv.lock"
+            lockfile.write_text(
+                "\n".join([
+                    "version = 1",
+                    "",
+                    "[[package]]",
+                    'name = "urllib3"',
+                    'version = "2.2.1"',
+                    'source = { registry = "https://pypi.org/simple" }',
+                ]),
+                encoding="utf-8",
+            )
+            out = io.StringIO()
+            err = io.StringIO()
+            now = siberia.datetime(2026, 5, 20, tzinfo=siberia.timezone.utc)
+
+            with patch("siberia.cli.datetime") as mocked_datetime:
+                mocked_datetime.now.return_value = now
+                mocked_datetime.side_effect = lambda *args, **kwargs: siberia.datetime(*args, **kwargs)
+                mocked_datetime.fromisoformat.side_effect = siberia.datetime.fromisoformat
+                with patch("siberia.cli._pypi_published_at", return_value=now):
+                    rc = siberia.cmd_check(AppConfig(), [str(lockfile)], False, out, err, verbosity=3)
+
+        self.assertEqual(rc, 1)
+        self.assertIn("lookup: pypi urllib3@2.2.1", err.getvalue())
+
+    def test_crates_lookup_reuses_cached_publish_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "check-cache.json"
+            with patch("siberia.cli._PUBLISHED_AT_CACHE", {}):
+                with patch("siberia.cli._KNOWN_OLD_VERSION_FLOORS", {}):
+                    with patch("siberia.cli._CHECK_CACHE_PATH", cache_path):
+                        with patch("siberia.cli._CHECK_CACHE_LOADED", False):
+                            with patch(
+                                "siberia.cli._http_get_json",
+                                return_value={"version": {"created_at": "2026-05-20T00:00:00Z"}},
+                            ) as mocked_get:
+                                first = siberia._crates_published_at("serde", "1.0.219")
+                                second = siberia._crates_published_at("serde", "1.0.219")
+
+        self.assertEqual(first, second)
+        self.assertEqual(mocked_get.call_count, 1)
+
+    def test_persistent_cache_reuses_publish_metadata_across_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "check-cache.json"
+            with patch("siberia.cli._PUBLISHED_AT_CACHE", {}):
+                with patch("siberia.cli._KNOWN_OLD_VERSION_FLOORS", {}):
+                    with patch("siberia.cli._CHECK_CACHE_PATH", cache_path):
+                        with patch(
+                            "siberia.cli._http_get_json",
+                            return_value={"version": {"created_at": "2026-05-20T00:00:00Z"}},
+                        ) as first_get:
+                            first = siberia._crates_published_at("serde", "1.0.219")
+                        with patch("siberia.cli._PUBLISHED_AT_CACHE", {}):
+                            with patch("siberia.cli._KNOWN_OLD_VERSION_FLOORS", {}):
+                                with patch("siberia.cli._CHECK_CACHE_LOADED", False):
+                                    with patch("siberia.cli._http_get_json") as second_get:
+                                        second = siberia._crates_published_at("serde", "1.0.219")
+
+        self.assertEqual(first, second)
+        self.assertEqual(first_get.call_count, 1)
+        self.assertEqual(second_get.call_count, 0)
+
+    def test_persistent_cache_reuses_known_old_floor_for_lower_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "check-cache.json"
+            now = siberia.datetime(2026, 5, 20, tzinfo=siberia.timezone.utc)
+            old_enough = now - timedelta(days=30)
+            with patch("siberia.cli._PUBLISHED_AT_CACHE", {}):
+                with patch("siberia.cli._KNOWN_OLD_VERSION_FLOORS", {}):
+                    with patch("siberia.cli._CHECK_CACHE_PATH", cache_path):
+                        with patch("siberia.cli._CHECK_CACHE_LOADED", False):
+                            with patch("siberia.cli._CURRENT_CACHE_TTL_SECONDS", 3600):
+                                with patch("siberia.cli.datetime") as mocked_datetime:
+                                    mocked_datetime.now.return_value = now
+                                    mocked_datetime.side_effect = lambda *args, **kwargs: siberia.datetime(*args, **kwargs)
+                                    mocked_datetime.fromisoformat.side_effect = siberia.datetime.fromisoformat
+                                    with patch("siberia.cli._http_get_json", return_value={"urls": [{"upload_time_iso_8601": "2026-04-20T00:00:00Z"}]}) as mocked_get:
+                                        higher = siberia._pypi_published_at("urllib3", "1.8.0")
+                                        lower = siberia._pypi_published_at("urllib3", "1.7.0")
+
+        self.assertEqual(higher, old_enough)
+        self.assertEqual(lower, old_enough)
+        self.assertEqual(mocked_get.call_count, 1)
+
+    def test_cargo_lock_prefetches_versions_per_crate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "check-cache.json"
+            lockfile = Path(tmp) / "Cargo.lock"
+            lockfile.write_text(
+                "\n".join([
+                    "[[package]]",
+                    'name = "serde"',
+                    'version = "1.0.219"',
+                    "",
+                    "[[package]]",
+                    'name = "serde_derive"',
+                    'version = "1.0.219"',
+                    "",
+                    "[[package]]",
+                    'name = "serde"',
+                    'version = "1.0.218"',
+                    "",
+                ]),
+                encoding="utf-8",
+            )
+            now = siberia.datetime(2026, 5, 20, tzinfo=siberia.timezone.utc)
+            old_enough = now - timedelta(days=30)
+            requested_urls: list[str] = []
+
+            def fake_get(url: str) -> dict:
+                requested_urls.append(url)
+                if url.endswith("/crates/serde"):
+                    return {
+                        "versions": [
+                            {"num": "1.0.219", "created_at": "2026-04-20T00:00:00Z"},
+                            {"num": "1.0.218", "created_at": "2026-04-19T00:00:00Z"},
+                        ]
+                    }
+                if url.endswith("/crates/serde_derive"):
+                    return {
+                        "versions": [
+                            {"num": "1.0.219", "created_at": "2026-04-18T00:00:00Z"},
+                        ]
+                    }
+                raise AssertionError(f"unexpected url: {url}")
+
+            with patch("siberia.cli._PUBLISHED_AT_CACHE", {}) as published_cache:
+                with patch("siberia.cli._KNOWN_OLD_VERSION_FLOORS", {}):
+                    with patch("siberia.cli._CHECK_CACHE_PATH", cache_path):
+                        with patch("siberia.cli._CHECK_CACHE_LOADED", False):
+                            with patch("siberia.cli._CURRENT_CACHE_TTL_SECONDS", 3600):
+                                with patch("siberia.cli._CURRENT_AGE_THRESHOLD_DAYS", 7):
+                                    with patch("siberia.cli._http_get_json", side_effect=fake_get) as mocked_get:
+                                        violations = siberia._check_cargo_lock(lockfile, 7, now)
+                                        self.assertEqual(published_cache[("crates", "serde", "1.0.219")], old_enough)
+                                        self.assertEqual(published_cache[("crates", "serde", "1.0.218")], now - timedelta(days=31))
+                                        self.assertEqual(published_cache[("crates", "serde_derive", "1.0.219")], now - timedelta(days=32))
+
+        self.assertEqual(violations, [])
+        self.assertEqual(mocked_get.call_count, 2)
+        self.assertEqual(
+            requested_urls,
+            [
+                "https://crates.io/api/v1/crates/serde",
+                "https://crates.io/api/v1/crates/serde_derive",
+            ],
+        )
+
+    def test_cmd_check_use_ctime_skips_lookup_for_old_local_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lockfile = root / "uv.lock"
+            artifact = root / ".siberia-ctime" / "urllib3-2.2.1.whl"
+            artifact.parent.mkdir()
+            artifact.write_text("placeholder", encoding="utf-8")
+            lockfile.write_text(
+                "\n".join([
+                    "version = 1",
+                    "",
+                    "[[package]]",
+                    'name = "urllib3"',
+                    'version = "2.2.1"',
+                    'source = { registry = "https://pypi.org/simple" }',
+                ]),
+                encoding="utf-8",
+            )
+            out = io.StringIO()
+            err = io.StringIO()
+            now = siberia.datetime(2026, 5, 20, tzinfo=siberia.timezone.utc)
+            old_stat = unittest.mock.Mock(st_ctime=(now - timedelta(days=30)).timestamp())
+
+            with patch("siberia.cli.datetime") as mocked_datetime:
+                mocked_datetime.now.return_value = now
+                mocked_datetime.side_effect = lambda *args, **kwargs: siberia.datetime(*args, **kwargs)
+                mocked_datetime.fromisoformat.side_effect = siberia.datetime.fromisoformat
+                with patch("siberia.cli._find_ctime_artifact", return_value=artifact):
+                    with patch("pathlib.Path.stat", return_value=old_stat):
+                        with patch("siberia.cli._pypi_published_at") as mocked_lookup:
+                            rc = siberia.cmd_check(
+                                AppConfig(),
+                                [str(lockfile)],
+                                False,
+                                out,
+                                err,
+                                use_ctime=True,
+                            )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(mocked_lookup.call_count, 0)
 
     def test_cmd_check_reports_unsupported_file_type(self) -> None:
         out = io.StringIO()
@@ -776,6 +1287,7 @@ class CheckCommandTests(unittest.TestCase):
             with patch("siberia.cli.datetime") as mocked_datetime:
                 mocked_datetime.now.return_value = now
                 mocked_datetime.side_effect = lambda *args, **kwargs: siberia.datetime(*args, **kwargs)
+                mocked_datetime.fromisoformat.side_effect = siberia.datetime.fromisoformat
                 with patch("siberia.cli._pypi_published_at", return_value=now):
                     rc = main(["check", str(lockfile)], out=out, err=err, env={})
 

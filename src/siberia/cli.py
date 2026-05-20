@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+import time
 import tomllib
 import urllib.request
 from collections.abc import Mapping
@@ -15,8 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TextIO
 
-
-__version__ = "0.3.0"
+from . import __version__
 
 
 # ---------------------------------------------------------------------------
@@ -24,6 +24,190 @@ __version__ = "0.3.0"
 # ---------------------------------------------------------------------------
 
 _AGE_PATTERN = re.compile(r"^(\d+)\s*(d|day|days|w|week|weeks)?$", re.IGNORECASE)
+_REAL_DATETIME = datetime
+_PUBLISHED_AT_CACHE: dict[tuple[str, str, str], datetime | None] = {}
+_KNOWN_OLD_VERSION_FLOORS: dict[tuple[str, str, int], tuple[str, datetime]] = {}
+_CHECK_CACHE_LOADED = False
+_CURRENT_CTIME_THRESHOLD_DAYS = 0
+_CURRENT_CACHE_TTL_SECONDS = 3600
+_CURRENT_AGE_THRESHOLD_DAYS = 7
+
+
+def _default_check_cache_path() -> Path:
+    cache_home = os.environ.get("XDG_CACHE_HOME")
+    if cache_home:
+        return Path(cache_home).expanduser() / "siberia" / "check-cache.json"
+    return Path("~/.cache/siberia/check-cache.json").expanduser()
+
+
+def _read_cache_document() -> dict[str, dict[str, dict[str, str | None]]]:
+    if not _CHECK_CACHE_PATH.exists():
+        return {"entries": {}, "known_old_floors": {}}
+    try:
+        loaded = json.loads(_CHECK_CACHE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {"entries": {}, "known_old_floors": {}}
+    if not isinstance(loaded, dict):
+        return {"entries": {}, "known_old_floors": {}}
+    if "entries" in loaded or "known_old_floors" in loaded:
+        entries = loaded.get("entries") if isinstance(loaded.get("entries"), dict) else {}
+        known_old_floors = loaded.get("known_old_floors") if isinstance(loaded.get("known_old_floors"), dict) else {}
+        return {"entries": entries, "known_old_floors": known_old_floors}
+    # Backward compatibility for cache files written before sections were added.
+    return {"entries": loaded, "known_old_floors": {}}
+
+
+def _write_cache_document(document: dict[str, dict[str, dict[str, str | None]]]) -> None:
+    _CHECK_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _CHECK_CACHE_PATH.write_text(json.dumps(document, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _normalize_version(version: str) -> tuple[int, ...] | None:
+    if not re.fullmatch(r"\d+(?:\.\d+)*", version):
+        return None
+    parts = tuple(int(part) for part in version.split("."))
+    trimmed = list(parts)
+    while len(trimmed) > 1 and trimmed[-1] == 0:
+        trimmed.pop()
+    return tuple(trimmed)
+
+
+def _known_old_floor_hit(registry: str, package: str, version: str, threshold_days: int) -> datetime | None:
+    requested = _normalize_version(version)
+    if requested is None:
+        return None
+    floor = _KNOWN_OLD_VERSION_FLOORS.get((registry, package, threshold_days))
+    if floor is None:
+        return None
+    floor_version, published_at = floor
+    known = _normalize_version(floor_version)
+    if known is None or requested > known:
+        return None
+    return published_at
+
+
+def _record_known_old_floor(
+    registry: str,
+    package: str,
+    version: str,
+    published_at: datetime,
+    now: datetime,
+    threshold_days: int,
+) -> None:
+    if threshold_days <= 0:
+        return
+    normalized = _normalize_version(version)
+    if normalized is None:
+        return
+    age_days = (now - published_at).total_seconds() / 86400
+    if age_days < threshold_days:
+        return
+    floor_key = (registry, package, threshold_days)
+    current = _KNOWN_OLD_VERSION_FLOORS.get(floor_key)
+    if current is not None:
+        current_version, _current_published_at = current
+        known = _normalize_version(current_version)
+        if known is not None and normalized <= known:
+            return
+    _KNOWN_OLD_VERSION_FLOORS[floor_key] = (version, published_at)
+    _persist_known_old_floor(floor_key, version, published_at, now)
+
+
+def _load_persistent_cache(now: datetime, ttl_seconds: int) -> None:
+    global _CHECK_CACHE_LOADED, _CURRENT_CACHE_TTL_SECONDS
+    _CURRENT_CACHE_TTL_SECONDS = ttl_seconds
+    if _CHECK_CACHE_LOADED or ttl_seconds <= 0 or not _CHECK_CACHE_PATH.exists():
+        _CHECK_CACHE_LOADED = True
+        return
+    document = _read_cache_document()
+    for raw_key, entry in document["entries"].items():
+        if not isinstance(raw_key, str) or not isinstance(entry, dict):
+            continue
+        parts = raw_key.split("|", 2)
+        if len(parts) != 3:
+            continue
+        cached_at = entry.get("cached_at")
+        if not isinstance(cached_at, str):
+            continue
+        try:
+            cached_at_dt = _REAL_DATETIME.fromisoformat(cached_at)
+        except ValueError:
+            continue
+        if (now - cached_at_dt).total_seconds() > ttl_seconds:
+            continue
+        published_at = entry.get("published_at")
+        if isinstance(published_at, str):
+            try:
+                _PUBLISHED_AT_CACHE[tuple(parts)] = _REAL_DATETIME.fromisoformat(published_at)
+            except ValueError:
+                continue
+        else:
+            _PUBLISHED_AT_CACHE[tuple(parts)] = None
+    for raw_key, entry in document["known_old_floors"].items():
+        if not isinstance(raw_key, str) or not isinstance(entry, dict):
+            continue
+        parts = raw_key.split("|", 2)
+        if len(parts) != 3:
+            continue
+        cached_at = entry.get("cached_at")
+        published_at = entry.get("published_at")
+        version = entry.get("version")
+        if not isinstance(cached_at, str) or not isinstance(published_at, str) or not isinstance(version, str):
+            continue
+        try:
+            cached_at_dt = _REAL_DATETIME.fromisoformat(cached_at)
+            published_at_dt = _REAL_DATETIME.fromisoformat(published_at)
+            threshold_days = int(parts[2])
+        except (TypeError, ValueError):
+            continue
+        if (now - cached_at_dt).total_seconds() > ttl_seconds:
+            continue
+        _KNOWN_OLD_VERSION_FLOORS[(parts[0], parts[1], threshold_days)] = (version, published_at_dt)
+    _CHECK_CACHE_LOADED = True
+
+
+def _persist_cache_entry(cache_key: tuple[str, str, str], published_at: datetime | None, now: datetime) -> None:
+    document = _read_cache_document()
+    document["entries"]["|".join(cache_key)] = {
+        "published_at": published_at.isoformat() if published_at is not None else None,
+        "cached_at": now.isoformat(),
+    }
+    _write_cache_document(document)
+
+
+def _persist_known_old_floor(
+    floor_key: tuple[str, str, int],
+    version: str,
+    published_at: datetime,
+    now: datetime,
+) -> None:
+    document = _read_cache_document()
+    document["known_old_floors"][f"{floor_key[0]}|{floor_key[1]}|{floor_key[2]}"] = {
+        "version": version,
+        "published_at": published_at.isoformat(),
+        "cached_at": now.isoformat(),
+    }
+    _write_cache_document(document)
+
+
+def _find_ctime_artifact(package: str, version: str) -> Path | None:
+    search_root = Path(".siberia-ctime")
+    if not search_root.exists():
+        return None
+    normalized_package = package.replace("/", "-")
+    token = f"{normalized_package}-{version}"
+    for candidate in search_root.rglob("*"):
+        if candidate.is_file() and token in candidate.name:
+            return candidate
+    return None
+
+
+def _ctime_allows_skip(package: str, version: str, now: datetime) -> bool:
+    artifact = _find_ctime_artifact(package, version)
+    if artifact is None:
+        return False
+    age_days = (now.timestamp() - artifact.stat().st_ctime) / 86400
+    return age_days >= _CURRENT_CTIME_THRESHOLD_DAYS
 
 
 def parse_age(value: str) -> int:
@@ -69,6 +253,7 @@ class AppConfig:
 
 
 DEFAULT_CONFIG_PATH = Path("~/.config/siberia/config.toml").expanduser()
+_CHECK_CACHE_PATH = _default_check_cache_path()
 
 _BOOL_ENV_VARS: dict[str, str] = {
     "enable_pip": "SIBERIA_ENABLE_PIP",
@@ -289,7 +474,8 @@ def _print_verbose_config_report(lines_by_path: dict[str, list[str]], out: TextI
             print(f"  {line}", file=out)
 
 
-def cmd_config(config: AppConfig, home: Path, out: TextIO, verbose: bool = False) -> int:
+def cmd_config(config: AppConfig, home: Path, out: TextIO, verbosity: int = 0) -> int:
+    verbose = verbosity > 0
     written: list[str] = []
     verbose_lines: dict[str, list[str]] = {}
     pip_path = home / ".config" / "pip" / "pip.conf"
@@ -466,37 +652,116 @@ def _http_get_json(url: str) -> dict:
 
 
 def _npm_published_at(package: str, version: str) -> datetime | None:
+    _load_persistent_cache(_REAL_DATETIME.now(timezone.utc), _CURRENT_CACHE_TTL_SECONDS)
+    cache_key = ("npm", package, version)
+    if cache_key in _PUBLISHED_AT_CACHE:
+        return _PUBLISHED_AT_CACHE[cache_key]
+    known_old = _known_old_floor_hit("npm", package, version, _CURRENT_AGE_THRESHOLD_DAYS)
+    if known_old is not None:
+        _PUBLISHED_AT_CACHE[cache_key] = known_old
+        return known_old
     try:
         data = _http_get_json(f"https://registry.npmjs.org/{package}")
         timestamp = data.get("time", {}).get(version)
         if timestamp:
-            return datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            published_at = _REAL_DATETIME.fromisoformat(timestamp.replace("Z", "+00:00"))
+            _PUBLISHED_AT_CACHE[cache_key] = published_at
+            _persist_cache_entry(cache_key, published_at, _REAL_DATETIME.now(timezone.utc))
+            _record_known_old_floor("npm", package, version, published_at, datetime.now(timezone.utc), _CURRENT_AGE_THRESHOLD_DAYS)
+            return published_at
     except Exception:
         pass
+    _PUBLISHED_AT_CACHE[cache_key] = None
+    _persist_cache_entry(cache_key, None, _REAL_DATETIME.now(timezone.utc))
     return None
 
 
 def _pypi_published_at(package: str, version: str) -> datetime | None:
+    _load_persistent_cache(_REAL_DATETIME.now(timezone.utc), _CURRENT_CACHE_TTL_SECONDS)
+    cache_key = ("pypi", package, version)
+    if cache_key in _PUBLISHED_AT_CACHE:
+        return _PUBLISHED_AT_CACHE[cache_key]
+    known_old = _known_old_floor_hit("pypi", package, version, _CURRENT_AGE_THRESHOLD_DAYS)
+    if known_old is not None:
+        _PUBLISHED_AT_CACHE[cache_key] = known_old
+        return known_old
     try:
         data = _http_get_json(f"https://pypi.org/pypi/{package}/{version}/json")
         for url in data.get("urls", []):
             timestamp = url.get("upload_time_iso_8601") or url.get("upload_time")
             if timestamp:
-                return datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                published_at = _REAL_DATETIME.fromisoformat(timestamp.replace("Z", "+00:00"))
+                _PUBLISHED_AT_CACHE[cache_key] = published_at
+                _persist_cache_entry(cache_key, published_at, _REAL_DATETIME.now(timezone.utc))
+                _record_known_old_floor("pypi", package, version, published_at, datetime.now(timezone.utc), _CURRENT_AGE_THRESHOLD_DAYS)
+                return published_at
     except Exception:
         pass
+    _PUBLISHED_AT_CACHE[cache_key] = None
+    _persist_cache_entry(cache_key, None, _REAL_DATETIME.now(timezone.utc))
     return None
 
 
 def _crates_published_at(package: str, version: str) -> datetime | None:
+    _load_persistent_cache(_REAL_DATETIME.now(timezone.utc), _CURRENT_CACHE_TTL_SECONDS)
+    cache_key = ("crates", package, version)
+    if cache_key in _PUBLISHED_AT_CACHE:
+        return _PUBLISHED_AT_CACHE[cache_key]
+    known_old = _known_old_floor_hit("crates", package, version, _CURRENT_AGE_THRESHOLD_DAYS)
+    if known_old is not None:
+        _PUBLISHED_AT_CACHE[cache_key] = known_old
+        return known_old
     try:
         data = _http_get_json(f"https://crates.io/api/v1/crates/{package}/{version}")
         timestamp = data.get("version", {}).get("created_at")
         if timestamp:
-            return datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            published_at = _REAL_DATETIME.fromisoformat(timestamp.replace("Z", "+00:00"))
+            _PUBLISHED_AT_CACHE[cache_key] = published_at
+            _persist_cache_entry(cache_key, published_at, _REAL_DATETIME.now(timezone.utc))
+            _record_known_old_floor("crates", package, version, published_at, datetime.now(timezone.utc), _CURRENT_AGE_THRESHOLD_DAYS)
+            return published_at
     except Exception:
         pass
+    _PUBLISHED_AT_CACHE[cache_key] = None
+    _persist_cache_entry(cache_key, None, _REAL_DATETIME.now(timezone.utc))
     return None
+
+
+def _prefetch_crates_versions(packages: list[tuple[str, str]], now: datetime) -> None:
+    requested: dict[str, set[str]] = {}
+    for package, version in packages:
+        if not package or not version:
+            continue
+        cache_key = ("crates", package, version)
+        if cache_key in _PUBLISHED_AT_CACHE:
+            continue
+        if _known_old_floor_hit("crates", package, version, _CURRENT_AGE_THRESHOLD_DAYS) is not None:
+            continue
+        requested.setdefault(package, set()).add(version)
+    for package, versions in requested.items():
+        try:
+            data = _http_get_json(f"https://crates.io/api/v1/crates/{package}")
+        except Exception:
+            continue
+        matched_versions: set[str] = set()
+        for entry in data.get("versions", []):
+            if not isinstance(entry, dict):
+                continue
+            version = entry.get("num")
+            timestamp = entry.get("created_at")
+            if not isinstance(version, str) or version not in versions or not isinstance(timestamp, str):
+                continue
+            published_at = _REAL_DATETIME.fromisoformat(timestamp.replace("Z", "+00:00"))
+            cache_key = ("crates", package, version)
+            _PUBLISHED_AT_CACHE[cache_key] = published_at
+            _persist_cache_entry(cache_key, published_at, _REAL_DATETIME.now(timezone.utc))
+            _record_known_old_floor("crates", package, version, published_at, now, _CURRENT_AGE_THRESHOLD_DAYS)
+            matched_versions.add(version)
+        for version in versions - matched_versions:
+            cache_key = ("crates", package, version)
+            if cache_key not in _PUBLISHED_AT_CACHE:
+                _PUBLISHED_AT_CACHE[cache_key] = None
+                _persist_cache_entry(cache_key, None, _REAL_DATETIME.now(timezone.utc))
 
 
 def _collect_violations(
@@ -512,6 +777,8 @@ def _collect_violations(
         if not name or not version or (name, version) in seen:
             continue
         seen.add((name, version))
+        if _CURRENT_CTIME_THRESHOLD_DAYS and _ctime_allows_skip(name, version, now):
+            continue
         published_at = published_lookup(name, version)
         if published_at is None:
             continue
@@ -655,6 +922,35 @@ def _check_pipfile_lock(path: Path, threshold_days: int, now: datetime) -> list[
     return _collect_violations(path, packages, threshold_days, now, _pypi_published_at)
 
 
+def _scan_lockfile_targets(root: Path) -> list[Path]:
+    candidates: list[Path] = []
+    supported_names = set(_LOCKFILE_CHECKERS)
+    for current_root, _dirs, files in os.walk(root):
+        base = Path(current_root)
+        for name in files:
+            if not (name.endswith(".lock") or name == "requirements.txt" or name.endswith(".lock.json") or name.endswith(".lock.yaml")):
+                continue
+            if name in supported_names:
+                candidates.append(base / name)
+    return sorted(candidates)
+
+
+def _status_line(stream: TextIO, path: Path, ok: bool) -> str:
+    rendered_path = str(path)
+    if hasattr(stream, "isatty") and stream.isatty():
+        if ok:
+            return f"\x1b[32m✓ {rendered_path}\x1b[0m"
+        return f"\x1b[31m✗ {rendered_path}\x1b[0m"
+    if ok:
+        return f"OK {rendered_path}"
+    return f"X {rendered_path}"
+
+
+def _verbose_check(err: TextIO, verbosity: int, level: int, message: str) -> None:
+    if verbosity >= level:
+        print(message, file=err)
+
+
 def _check_requirements_txt(path: Path, threshold_days: int, now: datetime) -> list[Violation]:
     violations: list[Violation] = []
     try:
@@ -685,6 +981,7 @@ def _check_cargo_lock(path: Path, threshold_days: int, now: datetime) -> list[Vi
     except Exception:
         return violations
     current: dict[str, str] = {}
+    packages: list[tuple[str, str]] = []
     for line in text.splitlines():
         line = line.strip()
         if line == "[[package]]":
@@ -694,22 +991,12 @@ def _check_cargo_lock(path: Path, threshold_days: int, now: datetime) -> list[Vi
         elif line.startswith("version = "):
             current["version"] = line.split("=", 1)[1].strip().strip('"')
         elif line == "" and "name" in current and "version" in current:
-            published_at = _crates_published_at(current["name"], current["version"])
-            if published_at is not None:
-                age = (now - published_at).total_seconds() / 86400
-                if age < threshold_days:
-                    violations.append(
-                        Violation(
-                            path,
-                            current["name"],
-                            current["version"],
-                            published_at,
-                            age,
-                            threshold_days,
-                        )
-                    )
+            packages.append((current["name"], current["version"]))
             current = {}
-    return violations
+    if "name" in current and "version" in current:
+        packages.append((current["name"], current["version"]))
+    _prefetch_crates_versions(packages, now)
+    return _collect_violations(path, packages, threshold_days, now, _crates_published_at)
 
 
 _LOCKFILE_CHECKERS = {
@@ -732,12 +1019,19 @@ def cmd_check(
     scan: bool,
     out: TextIO,
     err: TextIO,
+    verbosity: int = 0,
+    use_ctime: bool = False,
 ) -> int:
+    global _CURRENT_CTIME_THRESHOLD_DAYS, _CURRENT_AGE_THRESHOLD_DAYS
     now = datetime.now(timezone.utc)
     threshold = config.min_age_days
+    _load_persistent_cache(now, config.cache_ttl_seconds)
+    _CURRENT_CTIME_THRESHOLD_DAYS = threshold if use_ctime else 0
+    _CURRENT_AGE_THRESHOLD_DAYS = threshold
 
     if scan:
-        targets = sorted(path for name in _LOCKFILE_CHECKERS for path in Path(".").rglob(name))
+        targets = _scan_lockfile_targets(Path("."))
+        _verbose_check(err, verbosity, 1, f"scan: discovered {len(targets)} supported lockfiles")
     elif files:
         targets = [Path(path) for path in files]
     else:
@@ -756,10 +1050,24 @@ def cmd_check(
         if not target.exists():
             print(f"siberia check: file not found: {target}", file=err)
             continue
-        all_violations.extend(checker(target, threshold, now))
-
-    for violation in all_violations:
-        print(f"VIOLATION: {violation}", file=out)
+        _verbose_check(err, verbosity, 1, f"check: starting {target}")
+        started = time.perf_counter()
+        violations = checker(target, threshold, now)
+        elapsed = time.perf_counter() - started
+        print(_status_line(out, target, ok=not violations), file=out)
+        for violation in violations:
+            print(f"VIOLATION: {violation}", file=out)
+        _verbose_check(err, verbosity, 2, f"check: finished {target} in {elapsed:.2f}s")
+        if verbosity >= 3:
+            for violation in violations:
+                registry = "pypi"
+                if target.name in {"package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "bun.lock", "deno.lock"}:
+                    registry = "npm"
+                elif target.name == "Cargo.lock":
+                    registry = "crates"
+                _verbose_check(err, verbosity, 3, f"lookup: {registry} {violation.package}@{violation.version}")
+        if violations:
+            all_violations.extend(violations)
 
     if all_violations:
         print(
@@ -815,13 +1123,26 @@ def main(
     config_parser.add_argument(
         "-v",
         "--verbose",
-        action="store_true",
-        help="List managed config fields and whether they were injected",
+        action="count",
+        default=0,
+        help="Increase verbosity; repeat for more detail",
     )
 
     check_parser = subparsers.add_parser("check", help="Audit lockfiles for too-new packages")
     check_parser.add_argument("files", nargs="*", help="Lockfiles to check")
     check_parser.add_argument("--scan", action="store_true", help="Recursively scan for lockfiles")
+    check_parser.add_argument(
+        "--use-ctime",
+        action="store_true",
+        help="Aggressively trust local file ctime heuristics before cache or network lookups",
+    )
+    check_parser.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help="Increase verbosity; repeat for more detail",
+    )
     check_parser.add_argument(
         "--age",
         type=parse_age,
@@ -850,10 +1171,18 @@ def main(
 
     if args.command == "config":
         home = Path(active_env.get("HOME", str(Path.home())))
-        return cmd_config(config, home, active_out, verbose=args.verbose)
+        return cmd_config(config, home, active_out, verbosity=args.verbose)
 
     if args.command == "check":
-        return cmd_check(config, args.files, args.scan, active_out, active_err)
+        return cmd_check(
+            config,
+            args.files,
+            args.scan,
+            active_out,
+            active_err,
+            verbosity=args.verbose,
+            use_ctime=args.use_ctime,
+        )
 
     return 0
 
