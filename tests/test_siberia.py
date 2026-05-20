@@ -559,6 +559,230 @@ class MainSubcommandTests(unittest.TestCase):
         self.assertIn("siberia:", err.getvalue())
 
 
+class CheckCommandTests(unittest.TestCase):
+    def test_cmd_check_supports_uv_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lockfile = root / "uv.lock"
+            lockfile.write_text(
+                "\n".join([
+                    "version = 1",
+                    "",
+                    "[[package]]",
+                    'name = "urllib3"',
+                    'version = "2.2.1"',
+                    'source = { registry = "https://pypi.org/simple" }',
+                    "",
+                    "[[package]]",
+                    'name = "local-package"',
+                    'version = "0.1.0"',
+                    'source = { editable = "." }',
+                ]),
+                encoding="utf-8",
+            )
+            now = siberia.datetime(2026, 5, 20, tzinfo=siberia.timezone.utc)
+
+            with patch("siberia.cli._pypi_published_at", return_value=now):
+                violations = siberia._check_uv_lock(lockfile, 7, now)
+
+        self.assertEqual([(item.package, item.version) for item in violations], [("urllib3", "2.2.1")])
+
+    def test_cmd_check_supports_npm_shrinkwrap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lockfile = root / "npm-shrinkwrap.json"
+            lockfile.write_text(
+                """
+                {
+                  "packages": {
+                    "": {},
+                    "node_modules/react": {
+                      "version": "19.0.0"
+                    }
+                  }
+                }
+                """,
+                encoding="utf-8",
+            )
+            now = siberia.datetime(2026, 5, 20, tzinfo=siberia.timezone.utc)
+
+            with patch("siberia.cli._npm_published_at", return_value=now):
+                violations = siberia._check_npm_shrinkwrap(lockfile, 7, now)
+
+        self.assertEqual([(item.package, item.version) for item in violations], [("react", "19.0.0")])
+
+    def test_cmd_check_supports_bun_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lockfile = root / "bun.lock"
+            lockfile.write_text(
+                """
+                {
+                  "lockfileVersion": 1,
+                  "packages": {
+                    "react": ["react@19.0.0", "", {}, "sha512-test"],
+                    "workspace-pkg": ["workspace:packages/app", "", {}, ""]
+                  }
+                }
+                """,
+                encoding="utf-8",
+            )
+            now = siberia.datetime(2026, 5, 20, tzinfo=siberia.timezone.utc)
+
+            with patch("siberia.cli._npm_published_at", return_value=now):
+                violations = siberia._check_bun_lock(lockfile, 7, now)
+
+        self.assertEqual([(item.package, item.version) for item in violations], [("react", "19.0.0")])
+
+    def test_cmd_check_supports_deno_lock_npm_entries_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lockfile = root / "deno.lock"
+            lockfile.write_text(
+                """
+                {
+                  "version": "5",
+                  "npm": {
+                    "chalk@5.3.0": {"integrity": "sha512-test"}
+                  },
+                  "jsr": {
+                    "@std/assert@1.0.0": {"integrity": "abc123"}
+                  }
+                }
+                """,
+                encoding="utf-8",
+            )
+            now = siberia.datetime(2026, 5, 20, tzinfo=siberia.timezone.utc)
+
+            with patch("siberia.cli._npm_published_at", return_value=now) as mocked_lookup:
+                violations = siberia._check_deno_lock(lockfile, 7, now)
+
+        self.assertEqual([(item.package, item.version) for item in violations], [("chalk", "5.3.0")])
+        mocked_lookup.assert_called_once_with("chalk", "5.3.0")
+
+    def test_cmd_check_supports_poetry_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lockfile = root / "poetry.lock"
+            lockfile.write_text(
+                "\n".join([
+                    "[[package]]",
+                    'name = "requests"',
+                    'version = "2.32.3"',
+                    "",
+                    "[[package]]",
+                    'name = "requests"',
+                    'version = "2.32.3"',
+                ]),
+                encoding="utf-8",
+            )
+            now = siberia.datetime(2026, 5, 20, tzinfo=siberia.timezone.utc)
+
+            with patch("siberia.cli._pypi_published_at", return_value=now) as mocked_lookup:
+                violations = siberia._check_poetry_lock(lockfile, 7, now)
+
+        self.assertEqual([(item.package, item.version) for item in violations], [("requests", "2.32.3")])
+        mocked_lookup.assert_called_once_with("requests", "2.32.3")
+
+    def test_cmd_check_supports_pipfile_lock_default_and_develop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lockfile = root / "Pipfile.lock"
+            lockfile.write_text(
+                """
+                {
+                  "default": {
+                    "requests": {"version": "==2.32.3"}
+                  },
+                  "develop": {
+                    "pytest": {"version": "==8.3.3"}
+                  }
+                }
+                """,
+                encoding="utf-8",
+            )
+            now = siberia.datetime(2026, 5, 20, tzinfo=siberia.timezone.utc)
+
+            with patch("siberia.cli._pypi_published_at", return_value=now) as mocked_lookup:
+                violations = siberia._check_pipfile_lock(lockfile, 7, now)
+
+        self.assertEqual(
+            [(item.package, item.version) for item in violations],
+            [("requests", "2.32.3"), ("pytest", "8.3.3")],
+        )
+        self.assertEqual(mocked_lookup.call_count, 2)
+
+    def test_cmd_check_scan_finds_new_supported_lockfiles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "nested").mkdir()
+            (root / "nested" / "uv.lock").write_text(
+                "\n".join([
+                    "version = 1",
+                    "",
+                    "[[package]]",
+                    'name = "urllib3"',
+                    'version = "2.2.1"',
+                    'source = { registry = "https://pypi.org/simple" }',
+                ]),
+                encoding="utf-8",
+            )
+            out = io.StringIO()
+            err = io.StringIO()
+            now = siberia.datetime(2026, 5, 20, tzinfo=siberia.timezone.utc)
+
+            with patch("siberia.cli.datetime") as mocked_datetime:
+                mocked_datetime.now.return_value = now
+                mocked_datetime.side_effect = lambda *args, **kwargs: siberia.datetime(*args, **kwargs)
+                with patch("siberia.cli._pypi_published_at", return_value=now):
+                    cwd = os.getcwd()
+                    try:
+                        os.chdir(root)
+                        rc = siberia.cmd_check(AppConfig(), [], True, out, err)
+                    finally:
+                        os.chdir(cwd)
+
+        self.assertEqual(rc, 1)
+        self.assertIn("VIOLATION:", out.getvalue())
+
+    def test_cmd_check_reports_unsupported_file_type(self) -> None:
+        out = io.StringIO()
+        err = io.StringIO()
+
+        rc = siberia.cmd_check(AppConfig(), ["bun.lockb"], False, out, err)
+
+        self.assertEqual(rc, 0)
+        self.assertIn("unsupported file type", err.getvalue())
+
+    def test_main_check_supports_explicit_new_lockfile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lockfile = root / "Pipfile.lock"
+            lockfile.write_text(
+                """
+                {
+                  "default": {
+                    "requests": {"version": "==2.32.3"}
+                  },
+                  "develop": {}
+                }
+                """,
+                encoding="utf-8",
+            )
+            out = io.StringIO()
+            err = io.StringIO()
+            now = siberia.datetime(2026, 5, 20, tzinfo=siberia.timezone.utc)
+
+            with patch("siberia.cli.datetime") as mocked_datetime:
+                mocked_datetime.now.return_value = now
+                mocked_datetime.side_effect = lambda *args, **kwargs: siberia.datetime(*args, **kwargs)
+                with patch("siberia.cli._pypi_published_at", return_value=now):
+                    rc = main(["check", str(lockfile)], out=out, err=err, env={})
+
+        self.assertEqual(rc, 1)
+        self.assertIn("requests@2.32.3", out.getvalue())
+
+
 class NativeEnvOverrideTests(unittest.TestCase):
     def test_pip_env_overrides_uses_iso_duration(self) -> None:
         self.assertEqual(siberia.pip_env_overrides(AppConfig())["PIP_UPLOADED_PRIOR_TO"], "P7D")

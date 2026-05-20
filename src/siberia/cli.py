@@ -499,47 +499,160 @@ def _crates_published_at(package: str, version: str) -> datetime | None:
     return None
 
 
-def _check_package_lock(path: Path, threshold_days: int, now: datetime) -> list[Violation]:
+def _collect_violations(
+    path: Path,
+    packages: list[tuple[str, str]],
+    threshold_days: int,
+    now: datetime,
+    published_lookup,
+) -> list[Violation]:
     violations: list[Violation] = []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return violations
+    seen: set[tuple[str, str]] = set()
+    for name, version in packages:
+        if not name or not version or (name, version) in seen:
+            continue
+        seen.add((name, version))
+        published_at = published_lookup(name, version)
+        if published_at is None:
+            continue
+        age = (now - published_at).total_seconds() / 86400
+        if age < threshold_days:
+            violations.append(Violation(path, name, version, published_at, age, threshold_days))
+    return violations
+
+
+def _npm_packages_from_lock_data(data: dict) -> list[tuple[str, str]]:
+    packages: list[tuple[str, str]] = []
     for node_path, info in data.get("packages", {}).items():
-        if not node_path:
+        if not node_path or not isinstance(info, dict):
             continue
         name = info.get("name") or node_path.split("node_modules/")[-1]
         version = info.get("version", "")
-        if not version:
-            continue
-        published_at = _npm_published_at(name, version)
-        if published_at is None:
-            continue
-        age = (now - published_at).total_seconds() / 86400
-        if age < threshold_days:
-            violations.append(Violation(path, name, version, published_at, age, threshold_days))
-    return violations
+        if isinstance(name, str) and isinstance(version, str) and version:
+            packages.append((name, version))
+    return packages
+
+
+def _check_package_lock(path: Path, threshold_days: int, now: datetime) -> list[Violation]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    return _collect_violations(path, _npm_packages_from_lock_data(data), threshold_days, now, _npm_published_at)
+
+
+def _check_npm_shrinkwrap(path: Path, threshold_days: int, now: datetime) -> list[Violation]:
+    return _check_package_lock(path, threshold_days, now)
 
 
 def _check_pnpm_lock(path: Path, threshold_days: int, now: datetime) -> list[Violation]:
-    violations: list[Violation] = []
     try:
         text = path.read_text(encoding="utf-8")
     except Exception:
-        return violations
-    seen: set[tuple[str, str]] = set()
+        return []
+    packages: list[tuple[str, str]] = []
     for match in re.finditer(r"^\s+/?([^@\s/][^@\s]*?)@([^\s:]+):", text, re.MULTILINE):
         name, version = match.group(1), match.group(2)
-        if (name, version) in seen:
+        packages.append((name, version))
+    return _collect_violations(path, packages, threshold_days, now, _npm_published_at)
+
+
+def _check_bun_lock(path: Path, threshold_days: int, now: datetime) -> list[Violation]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    packages: list[tuple[str, str]] = []
+    for value in data.get("packages", {}).values():
+        if not isinstance(value, list) or not value:
             continue
-        seen.add((name, version))
-        published_at = _npm_published_at(name, version)
-        if published_at is None:
+        resolved = value[0]
+        if not isinstance(resolved, str) or "@" not in resolved:
             continue
-        age = (now - published_at).total_seconds() / 86400
-        if age < threshold_days:
-            violations.append(Violation(path, name, version, published_at, age, threshold_days))
-    return violations
+        if resolved.startswith(("workspace:", "link:", "file:")):
+            continue
+        name, version = resolved.rsplit("@", 1)
+        if name and version:
+            packages.append((name, version))
+    return _collect_violations(path, packages, threshold_days, now, _npm_published_at)
+
+
+def _check_deno_lock(path: Path, threshold_days: int, now: datetime) -> list[Violation]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    packages: list[tuple[str, str]] = []
+    for key in data.get("npm", {}):
+        if not isinstance(key, str) or "@" not in key:
+            continue
+        name, version = key.rsplit("@", 1)
+        if name and version:
+            packages.append((name, version))
+    return _collect_violations(path, packages, threshold_days, now, _npm_published_at)
+
+
+def _check_uv_lock(path: Path, threshold_days: int, now: datetime) -> list[Violation]:
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    packages: list[tuple[str, str]] = []
+    for package in data.get("package", []):
+        if not isinstance(package, dict):
+            continue
+        name = package.get("name")
+        version = package.get("version")
+        source = package.get("source")
+        if not isinstance(name, str) or not isinstance(version, str):
+            continue
+        if isinstance(source, dict) and "registry" not in source:
+            continue
+        packages.append((name, version))
+    return _collect_violations(path, packages, threshold_days, now, _pypi_published_at)
+
+
+def _check_poetry_lock(path: Path, threshold_days: int, now: datetime) -> list[Violation]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return []
+    packages: list[tuple[str, str]] = []
+    current: dict[str, str] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped == "[[package]]":
+            if "name" in current and "version" in current:
+                packages.append((current["name"], current["version"]))
+            current = {}
+            continue
+        if stripped.startswith("name = "):
+            current["name"] = stripped.split("=", 1)[1].strip().strip('"')
+        elif stripped.startswith("version = "):
+            current["version"] = stripped.split("=", 1)[1].strip().strip('"')
+    if "name" in current and "version" in current:
+        packages.append((current["name"], current["version"]))
+    return _collect_violations(path, packages, threshold_days, now, _pypi_published_at)
+
+
+def _check_pipfile_lock(path: Path, threshold_days: int, now: datetime) -> list[Violation]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    packages: list[tuple[str, str]] = []
+    for section in ("default", "develop"):
+        entries = data.get(section, {})
+        if not isinstance(entries, dict):
+            continue
+        for name, info in entries.items():
+            if not isinstance(name, str) or not isinstance(info, dict):
+                continue
+            version = info.get("version")
+            if not isinstance(version, str):
+                continue
+            packages.append((name, version.lstrip("=")))
+    return _collect_violations(path, packages, threshold_days, now, _pypi_published_at)
 
 
 def _check_requirements_txt(path: Path, threshold_days: int, now: datetime) -> list[Violation]:
@@ -601,8 +714,14 @@ def _check_cargo_lock(path: Path, threshold_days: int, now: datetime) -> list[Vi
 
 _LOCKFILE_CHECKERS = {
     "package-lock.json": _check_package_lock,
+    "npm-shrinkwrap.json": _check_npm_shrinkwrap,
     "pnpm-lock.yaml": _check_pnpm_lock,
+    "bun.lock": _check_bun_lock,
+    "deno.lock": _check_deno_lock,
     "requirements.txt": _check_requirements_txt,
+    "uv.lock": _check_uv_lock,
+    "poetry.lock": _check_poetry_lock,
+    "Pipfile.lock": _check_pipfile_lock,
     "Cargo.lock": _check_cargo_lock,
 }
 

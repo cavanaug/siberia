@@ -2,7 +2,7 @@
 
 > All new packages are frozen like a cold Siberian winter, but you control the thaw rate...
 
-**Supply-chain hardening for pip, uv, npm, pnpm, and Cargo lockfile auditing.**
+**Supply-chain hardening for common Python, npm, Deno, Bun, pnpm, and Cargo lockfile auditing.**
 
 Siberia enforces a minimum-age policy on packages pulled from external repositories. Before a newly published package can enter your
 environment, it must have existed in the registry for at least N days. This one constraint eliminates an entire class of attack.
@@ -187,9 +187,21 @@ Supported lockfiles:
 | File | Registry |
 |------|----------|
 | `package-lock.json` | registry.npmjs.org |
+| `npm-shrinkwrap.json` | registry.npmjs.org |
 | `pnpm-lock.yaml` | registry.npmjs.org |
+| `bun.lock` | registry.npmjs.org |
+| `deno.lock` | registry.npmjs.org for `npm:` entries |
 | `requirements.txt` | pypi.org |
+| `uv.lock` | pypi.org |
+| `poetry.lock` | pypi.org |
+| `Pipfile.lock` | pypi.org |
 | `Cargo.lock` | crates.io |
+
+Notes:
+
+- `deno.lock` currently audits `npm:` packages only, not `jsr:` packages.
+- Bun support is for text `bun.lock` files, not legacy binary `bun.lockb`.
+- `Pipfile.lock` audits both `default` and `develop` sections.
 
 Exits 1 if any violations are found. Suitable as a CI gate.
 
