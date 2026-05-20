@@ -154,13 +154,15 @@ sourced (CI, Docker, subprocess invocations):
 ```sh
 siberia config
 siberia config --age 14d
-siberia config --verbose
+siberia config -v
+siberia config -vv
 ```
 
 Writes to: `~/.config/pip/pip.conf`, `~/.config/uv/uv.toml`, `~/.npmrc`, `~/.config/pnpm/rc`. All writes are idempotent.
 
-Use `-v` / `--verbose` to list the managed config fields grouped by target file, including both injected values and fields skipped because a
-tool or option is disabled.
+Use counted verbosity on `config` to list the managed fields grouped by target file, including both injected values and fields skipped
+because a tool or option is disabled. `-v`, `-vv`, and `-vvv` are accepted, although `config` currently uses verbosity as a simple on/off
+switch.
 
 Additional hardening written by `siberia config`:
 
@@ -180,7 +182,20 @@ siberia check                          # checks known lockfiles in current direc
 siberia check package-lock.json        # explicit file
 siberia check --scan                   # recursively scan the project tree
 siberia check --scan --age 30d         # stricter threshold for audit
+siberia check --scan -vv               # show discovery, per-file progress, and timings
+siberia check --scan --use-ctime       # optional aggressive local-artifact shortcut
 ```
+
+`check` now reports incremental per-file progress while it runs:
+
+- TTY output uses colored `✓` / `✗`
+- non-TTY output uses `OK` / `X`
+
+Counted verbosity on `check`:
+
+- `-v`: scan discovery and per-file start logs
+- `-vv`: per-file elapsed time
+- `-vvv`: package lookup logging
 
 Supported lockfiles:
 
@@ -202,6 +217,19 @@ Notes:
 - `deno.lock` currently audits `npm:` packages only, not `jsr:` packages.
 - Bun support is for text `bun.lock` files, not legacy binary `bun.lockb`.
 - `Pipfile.lock` audits both `default` and `develop` sections.
+- `Cargo.lock` metadata is cached and prefetched per crate where possible, but large cold Rust dependency sets can still be slower than other ecosystems.
+
+Persistent `check` cache:
+
+- `XDG_CACHE_HOME/siberia/check-cache.json`
+- fallback: `~/.cache/siberia/check-cache.json`
+
+This cache stores publish metadata across runs and also keeps conservative "known old" version floors so lower comparable versions can skip
+repeated registry lookups.
+
+`--use-ctime` is optional and intentionally aggressive. When enabled, Siberia may skip cache and network lookups if it finds a plausible
+local artifact whose `ctime` is already older than the configured threshold. Leave it off if you want the default path to rely only on
+cached and registry metadata.
 
 Exits 1 if any violations are found. Suitable as a CI gate.
 
