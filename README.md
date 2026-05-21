@@ -288,7 +288,7 @@ uvx siberia audit-lock --scan
 ### Install from a published GitHub release artifact
 
 ```sh
-uv tool install "https://github.com/cavanaug/siberia/releases/download/v0.4.0/siberia-0.4.0-py3-none-any.whl"
+uv tool install "https://github.com/cavanaug/siberia/releases/download/v0.5.0/siberia-0.5.0-py3-none-any.whl"
 ```
 
 ### Homebrew (macOS)

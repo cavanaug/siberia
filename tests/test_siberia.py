@@ -33,8 +33,8 @@ class TtyStringIO(io.StringIO):
 class PackageImportTests(unittest.TestCase):
     def test_package_cli_module_can_be_imported(self) -> None:
         module = importlib.import_module("siberia.cli")
-        self.assertEqual(module.__version__, "0.4.0")
-        self.assertEqual(__version__, "0.4.0")
+        self.assertEqual(module.__version__, "0.5.0")
+        self.assertEqual(__version__, "0.5.0")
 
     def test_module_cli_is_runnable_from_repo_root(self) -> None:
         env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
@@ -86,7 +86,7 @@ class PackageImportTests(unittest.TestCase):
             check=True,
         )
 
-        self.assertEqual(result.stdout.splitlines(), ["0.4.0", "False"])
+        self.assertEqual(result.stdout.splitlines(), ["0.5.0", "False"])
 
     def test_main_supports_top_level_version_flag(self) -> None:
         out = io.StringIO()
@@ -95,7 +95,7 @@ class PackageImportTests(unittest.TestCase):
         rc = main(["--version"], out=out, err=err, env={})
 
         self.assertEqual(rc, 0)
-        self.assertEqual(out.getvalue().strip(), "0.4.0")
+        self.assertEqual(out.getvalue().strip(), "0.5.0")
         self.assertEqual(err.getvalue(), "")
 
     def test_module_main_remains_callable(self) -> None:
