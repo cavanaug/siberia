@@ -615,7 +615,7 @@ def cmd_config(config: AppConfig, home: Path, out: TextIO, verbosity: int = 0) -
 
 
 # ---------------------------------------------------------------------------
-# siberia check
+# siberia audit-lock
 # ---------------------------------------------------------------------------
 
 
@@ -1013,7 +1013,7 @@ _LOCKFILE_CHECKERS = {
 }
 
 
-def cmd_check(
+def cmd_audit_lock(
     config: AppConfig,
     files: list[str],
     scan: bool,
@@ -1038,26 +1038,26 @@ def cmd_check(
         targets = [Path(name) for name in _LOCKFILE_CHECKERS if Path(name).exists()]
 
     if not targets:
-        print("siberia check: no lockfiles found", file=err)
+        print("siberia audit-lock: no lockfiles found", file=err)
         return 0
 
     all_violations: list[Violation] = []
     for target in targets:
         checker = _LOCKFILE_CHECKERS.get(target.name)
         if checker is None:
-            print(f"siberia check: unsupported file type: {target}", file=err)
+            print(f"siberia audit-lock: unsupported file type: {target}", file=err)
             continue
         if not target.exists():
-            print(f"siberia check: file not found: {target}", file=err)
+            print(f"siberia audit-lock: file not found: {target}", file=err)
             continue
-        _verbose_check(err, verbosity, 1, f"check: starting {target}")
+        _verbose_check(err, verbosity, 1, f"audit-lock: starting {target}")
         started = time.perf_counter()
         violations = checker(target, threshold, now)
         elapsed = time.perf_counter() - started
         print(_status_line(out, target, ok=not violations), file=out)
         for violation in violations:
             print(f"VIOLATION: {violation}", file=out)
-        _verbose_check(err, verbosity, 2, f"check: finished {target} in {elapsed:.2f}s")
+        _verbose_check(err, verbosity, 2, f"audit-lock: finished {target} in {elapsed:.2f}s")
         if verbosity >= 3:
             for violation in violations:
                 registry = "pypi"
@@ -1071,13 +1071,13 @@ def cmd_check(
 
     if all_violations:
         print(
-            f"\nsiberia check: {len(all_violations)} violation(s) found "
+            f"\nsiberia audit-lock: {len(all_violations)} violation(s) found "
             f"(threshold: {threshold} days)",
             file=err,
         )
         return 1
 
-    print(f"siberia check: all packages meet the {threshold}-day age requirement", file=out)
+    print(f"siberia audit-lock: all packages meet the {threshold}-day age requirement", file=out)
     return 0
 
 
@@ -1128,22 +1128,22 @@ def main(
         help="Increase verbosity; repeat for more detail",
     )
 
-    check_parser = subparsers.add_parser("check", help="Audit lockfiles for too-new packages")
-    check_parser.add_argument("files", nargs="*", help="Lockfiles to check")
-    check_parser.add_argument("--scan", action="store_true", help="Recursively scan for lockfiles")
-    check_parser.add_argument(
+    audit_lock_parser = subparsers.add_parser("audit-lock", help="Audit lockfiles for too-new packages")
+    audit_lock_parser.add_argument("files", nargs="*", help="Lockfiles to check")
+    audit_lock_parser.add_argument("--scan", action="store_true", help="Recursively scan for lockfiles")
+    audit_lock_parser.add_argument(
         "--use-ctime",
         action="store_true",
         help="Aggressively trust local file ctime heuristics before cache or network lookups",
     )
-    check_parser.add_argument(
+    audit_lock_parser.add_argument(
         "-v",
         "--verbose",
         action="count",
         default=0,
         help="Increase verbosity; repeat for more detail",
     )
-    check_parser.add_argument(
+    audit_lock_parser.add_argument(
         "--age",
         type=parse_age,
         default=None,
@@ -1173,8 +1173,8 @@ def main(
         home = Path(active_env.get("HOME", str(Path.home())))
         return cmd_config(config, home, active_out, verbosity=args.verbose)
 
-    if args.command == "check":
-        return cmd_check(
+    if args.command == "audit-lock":
+        return cmd_audit_lock(
             config,
             args.files,
             args.scan,

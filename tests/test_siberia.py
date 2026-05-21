@@ -583,7 +583,7 @@ class MainSubcommandTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn("[write] global.uploaded-prior-to = P7D", out.getvalue())
 
-    def test_main_check_accepts_counted_verbose_flags(self) -> None:
+    def test_main_audit_lock_accepts_counted_verbose_flags(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             lockfile = Path(tmp) / "uv.lock"
             lockfile.write_text(
@@ -607,12 +607,12 @@ class MainSubcommandTests(unittest.TestCase):
                 mocked_datetime.fromisoformat.side_effect = siberia.datetime.fromisoformat
                 with patch("siberia.cli.load_config", return_value=AppConfig()):
                     with patch("siberia.cli._pypi_published_at", return_value=now):
-                        rc = main(["check", "-vv", str(lockfile)], out=out, err=err, env={})
+                        rc = main(["audit-lock", "-vv", str(lockfile)], out=out, err=err, env={})
 
         self.assertEqual(rc, 1)
-        self.assertIn("check: starting", err.getvalue())
+        self.assertIn("audit-lock: starting", err.getvalue())
 
-    def test_main_check_accepts_use_ctime_flag(self) -> None:
+    def test_main_audit_lock_accepts_use_ctime_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             lockfile = Path(tmp) / "uv.lock"
             lockfile.write_text(
@@ -636,7 +636,7 @@ class MainSubcommandTests(unittest.TestCase):
                 mocked_datetime.fromisoformat.side_effect = siberia.datetime.fromisoformat
                 with patch("siberia.cli.load_config", return_value=AppConfig()):
                     with patch("siberia.cli._pypi_published_at", return_value=now):
-                        rc = main(["check", "--use-ctime", str(lockfile)], out=out, err=err, env={})
+                        rc = main(["audit-lock", "--use-ctime", str(lockfile)], out=out, err=err, env={})
 
         self.assertEqual(rc, 1)
 
@@ -659,7 +659,16 @@ class MainSubcommandTests(unittest.TestCase):
 
 
 class CheckCommandTests(unittest.TestCase):
-    def test_cmd_check_supports_uv_lock(self) -> None:
+    def test_cmd_audit_lock_reports_no_lockfiles(self) -> None:
+        out = io.StringIO()
+        err = io.StringIO()
+
+        rc = siberia.cmd_audit_lock(AppConfig(), [], False, out, err)
+
+        self.assertEqual(rc, 0)
+        self.assertIn("siberia audit-lock: no lockfiles found", err.getvalue())
+
+    def test_cmd_audit_lock_supports_uv_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             lockfile = root / "uv.lock"
@@ -686,7 +695,7 @@ class CheckCommandTests(unittest.TestCase):
 
         self.assertEqual([(item.package, item.version) for item in violations], [("urllib3", "2.2.1")])
 
-    def test_cmd_check_supports_npm_shrinkwrap(self) -> None:
+    def test_cmd_audit_lock_supports_npm_shrinkwrap(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             lockfile = root / "npm-shrinkwrap.json"
@@ -710,7 +719,7 @@ class CheckCommandTests(unittest.TestCase):
 
         self.assertEqual([(item.package, item.version) for item in violations], [("react", "19.0.0")])
 
-    def test_cmd_check_supports_bun_lock(self) -> None:
+    def test_cmd_audit_lock_supports_bun_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             lockfile = root / "bun.lock"
@@ -733,7 +742,7 @@ class CheckCommandTests(unittest.TestCase):
 
         self.assertEqual([(item.package, item.version) for item in violations], [("react", "19.0.0")])
 
-    def test_cmd_check_supports_deno_lock_npm_entries_only(self) -> None:
+    def test_cmd_audit_lock_supports_deno_lock_npm_entries_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             lockfile = root / "deno.lock"
@@ -759,7 +768,7 @@ class CheckCommandTests(unittest.TestCase):
         self.assertEqual([(item.package, item.version) for item in violations], [("chalk", "5.3.0")])
         mocked_lookup.assert_called_once_with("chalk", "5.3.0")
 
-    def test_cmd_check_supports_poetry_lock(self) -> None:
+    def test_cmd_audit_lock_supports_poetry_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             lockfile = root / "poetry.lock"
@@ -783,7 +792,7 @@ class CheckCommandTests(unittest.TestCase):
         self.assertEqual([(item.package, item.version) for item in violations], [("requests", "2.32.3")])
         mocked_lookup.assert_called_once_with("requests", "2.32.3")
 
-    def test_cmd_check_supports_pipfile_lock_default_and_develop(self) -> None:
+    def test_cmd_audit_lock_supports_pipfile_lock_default_and_develop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             lockfile = root / "Pipfile.lock"
@@ -811,7 +820,7 @@ class CheckCommandTests(unittest.TestCase):
         )
         self.assertEqual(mocked_lookup.call_count, 2)
 
-    def test_cmd_check_scan_finds_new_supported_lockfiles(self) -> None:
+    def test_cmd_audit_lock_scan_finds_new_supported_lockfiles(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "nested").mkdir()
@@ -838,14 +847,14 @@ class CheckCommandTests(unittest.TestCase):
                     cwd = os.getcwd()
                     try:
                         os.chdir(root)
-                        rc = siberia.cmd_check(AppConfig(), [], True, out, err)
+                        rc = siberia.cmd_audit_lock(AppConfig(), [], True, out, err)
                     finally:
                         os.chdir(cwd)
 
         self.assertEqual(rc, 1)
         self.assertIn("VIOLATION:", out.getvalue())
 
-    def test_cmd_check_scan_discovers_candidates_in_one_walk(self) -> None:
+    def test_cmd_audit_lock_scan_discovers_candidates_in_one_walk(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             lockfile = root / "uv.lock"
@@ -881,7 +890,7 @@ class CheckCommandTests(unittest.TestCase):
                                 cwd = os.getcwd()
                                 try:
                                     os.chdir(root)
-                                    rc = siberia.cmd_check(AppConfig(), [], True, out, err)
+                                    rc = siberia.cmd_audit_lock(AppConfig(), [], True, out, err)
                                 finally:
                                     os.chdir(cwd)
 
@@ -889,7 +898,7 @@ class CheckCommandTests(unittest.TestCase):
         mocked_walk.assert_called_once()
         self.assertIn("VIOLATION:", out.getvalue())
 
-    def test_cmd_check_reports_ok_per_file_on_non_tty(self) -> None:
+    def test_cmd_audit_lock_reports_ok_per_file_on_non_tty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             lockfile = root / "uv.lock"
@@ -913,12 +922,12 @@ class CheckCommandTests(unittest.TestCase):
                 mocked_datetime.side_effect = lambda *args, **kwargs: siberia.datetime(*args, **kwargs)
                 mocked_datetime.fromisoformat.side_effect = siberia.datetime.fromisoformat
                 with patch("siberia.cli._pypi_published_at", return_value=now - timedelta(days=30)):
-                    rc = siberia.cmd_check(AppConfig(), [str(lockfile)], False, out, err)
+                    rc = siberia.cmd_audit_lock(AppConfig(), [str(lockfile)], False, out, err)
 
         self.assertEqual(rc, 0)
         self.assertIn(f"OK {lockfile}", out.getvalue())
 
-    def test_cmd_check_reports_failure_per_file_on_non_tty(self) -> None:
+    def test_cmd_audit_lock_reports_failure_per_file_on_non_tty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             lockfile = root / "uv.lock"
@@ -942,13 +951,13 @@ class CheckCommandTests(unittest.TestCase):
                 mocked_datetime.side_effect = lambda *args, **kwargs: siberia.datetime(*args, **kwargs)
                 mocked_datetime.fromisoformat.side_effect = siberia.datetime.fromisoformat
                 with patch("siberia.cli._pypi_published_at", return_value=now):
-                    rc = siberia.cmd_check(AppConfig(), [str(lockfile)], False, out, err)
+                    rc = siberia.cmd_audit_lock(AppConfig(), [str(lockfile)], False, out, err)
 
         self.assertEqual(rc, 1)
         self.assertIn(f"X {lockfile}", out.getvalue())
         self.assertIn("VIOLATION:", out.getvalue())
 
-    def test_cmd_check_reports_unicode_status_on_tty(self) -> None:
+    def test_cmd_audit_lock_reports_unicode_status_on_tty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             ok_lockfile = root / "uv.lock"
@@ -989,13 +998,13 @@ class CheckCommandTests(unittest.TestCase):
                 mocked_datetime.side_effect = lambda *args, **kwargs: siberia.datetime(*args, **kwargs)
                 mocked_datetime.fromisoformat.side_effect = siberia.datetime.fromisoformat
                 with patch("siberia.cli._pypi_published_at", side_effect=fake_pypi):
-                    rc = siberia.cmd_check(AppConfig(), [str(ok_lockfile), str(bad_lockfile)], False, out, err)
+                    rc = siberia.cmd_audit_lock(AppConfig(), [str(ok_lockfile), str(bad_lockfile)], False, out, err)
 
         self.assertEqual(rc, 1)
         self.assertIn(f"\x1b[32m✓ {ok_lockfile}\x1b[0m", out.getvalue())
         self.assertIn(f"\x1b[31m✗ {bad_lockfile}\x1b[0m", out.getvalue())
 
-    def test_cmd_check_verbose_level_one_logs_discovery_and_start(self) -> None:
+    def test_cmd_audit_lock_verbose_level_one_logs_discovery_and_start(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             lockfile = root / "uv.lock"
@@ -1022,15 +1031,15 @@ class CheckCommandTests(unittest.TestCase):
                     cwd = os.getcwd()
                     try:
                         os.chdir(root)
-                        rc = siberia.cmd_check(AppConfig(), [], True, out, err, verbosity=1)
+                        rc = siberia.cmd_audit_lock(AppConfig(), [], True, out, err, verbosity=1)
                     finally:
                         os.chdir(cwd)
 
         self.assertEqual(rc, 1)
         self.assertIn("scan: discovered 1 supported lockfiles", err.getvalue())
-        self.assertIn(f"check: starting {lockfile.name}", err.getvalue())
+        self.assertIn(f"audit-lock: starting {lockfile.name}", err.getvalue())
 
-    def test_cmd_check_verbose_level_two_logs_elapsed_time(self) -> None:
+    def test_cmd_audit_lock_verbose_level_two_logs_elapsed_time(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             lockfile = root / "uv.lock"
@@ -1055,13 +1064,13 @@ class CheckCommandTests(unittest.TestCase):
                 mocked_datetime.fromisoformat.side_effect = siberia.datetime.fromisoformat
                 with patch("siberia.cli.time.perf_counter", side_effect=[1.0, 1.25]):
                     with patch("siberia.cli._pypi_published_at", return_value=now):
-                        rc = siberia.cmd_check(AppConfig(), [str(lockfile)], False, out, err, verbosity=2)
+                        rc = siberia.cmd_audit_lock(AppConfig(), [str(lockfile)], False, out, err, verbosity=2)
 
         self.assertEqual(rc, 1)
-        self.assertIn("check: finished", err.getvalue())
+        self.assertIn("audit-lock: finished", err.getvalue())
         self.assertIn("0.25s", err.getvalue())
 
-    def test_cmd_check_verbose_level_three_logs_package_lookups(self) -> None:
+    def test_cmd_audit_lock_verbose_level_three_logs_package_lookups(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             lockfile = root / "uv.lock"
@@ -1085,7 +1094,7 @@ class CheckCommandTests(unittest.TestCase):
                 mocked_datetime.side_effect = lambda *args, **kwargs: siberia.datetime(*args, **kwargs)
                 mocked_datetime.fromisoformat.side_effect = siberia.datetime.fromisoformat
                 with patch("siberia.cli._pypi_published_at", return_value=now):
-                    rc = siberia.cmd_check(AppConfig(), [str(lockfile)], False, out, err, verbosity=3)
+                    rc = siberia.cmd_audit_lock(AppConfig(), [str(lockfile)], False, out, err, verbosity=3)
 
         self.assertEqual(rc, 1)
         self.assertIn("lookup: pypi urllib3@2.2.1", err.getvalue())
@@ -1214,7 +1223,7 @@ class CheckCommandTests(unittest.TestCase):
             ],
         )
 
-    def test_cmd_check_use_ctime_skips_lookup_for_old_local_artifact(self) -> None:
+    def test_cmd_audit_lock_use_ctime_skips_lookup_for_old_local_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             lockfile = root / "uv.lock"
@@ -1244,7 +1253,7 @@ class CheckCommandTests(unittest.TestCase):
                 with patch("siberia.cli._find_ctime_artifact", return_value=artifact):
                     with patch("pathlib.Path.stat", return_value=old_stat):
                         with patch("siberia.cli._pypi_published_at") as mocked_lookup:
-                            rc = siberia.cmd_check(
+                            rc = siberia.cmd_audit_lock(
                                 AppConfig(),
                                 [str(lockfile)],
                                 False,
@@ -1256,16 +1265,16 @@ class CheckCommandTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(mocked_lookup.call_count, 0)
 
-    def test_cmd_check_reports_unsupported_file_type(self) -> None:
+    def test_cmd_audit_lock_reports_unsupported_file_type(self) -> None:
         out = io.StringIO()
         err = io.StringIO()
 
-        rc = siberia.cmd_check(AppConfig(), ["bun.lockb"], False, out, err)
+        rc = siberia.cmd_audit_lock(AppConfig(), ["bun.lockb"], False, out, err)
 
         self.assertEqual(rc, 0)
         self.assertIn("unsupported file type", err.getvalue())
 
-    def test_main_check_supports_explicit_new_lockfile(self) -> None:
+    def test_main_audit_lock_supports_explicit_new_lockfile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             lockfile = root / "Pipfile.lock"
@@ -1289,7 +1298,7 @@ class CheckCommandTests(unittest.TestCase):
                 mocked_datetime.side_effect = lambda *args, **kwargs: siberia.datetime(*args, **kwargs)
                 mocked_datetime.fromisoformat.side_effect = siberia.datetime.fromisoformat
                 with patch("siberia.cli._pypi_published_at", return_value=now):
-                    rc = main(["check", str(lockfile)], out=out, err=err, env={})
+                    rc = main(["audit-lock", str(lockfile)], out=out, err=err, env={})
 
         self.assertEqual(rc, 1)
         self.assertIn("requests@2.32.3", out.getvalue())
