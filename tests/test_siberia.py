@@ -1004,10 +1004,15 @@ class MainSubcommandTests(unittest.TestCase):
 
 class CheckCommandTests(unittest.TestCase):
     def test_cmd_audit_lock_reports_no_lockfiles(self) -> None:
-        out = io.StringIO()
-        err = io.StringIO()
-
-        rc = siberia.cmd_audit_lock(AppConfig(), [], False, out, err)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            err = io.StringIO()
+            cwd = os.getcwd()
+            try:
+                os.chdir(tmp)
+                rc = siberia.cmd_audit_lock(AppConfig(), [], False, out, err)
+            finally:
+                os.chdir(cwd)
 
         self.assertEqual(rc, 0)
         self.assertIn("siberia audit-lock: no lockfiles found", err.getvalue())
