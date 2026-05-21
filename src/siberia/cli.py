@@ -245,6 +245,8 @@ class AppConfig:
     enable_pnpm: bool = True
     enable_npx: bool = True
     enable_uv: bool = True
+    enable_bun: bool = True
+    enable_yarn: bool = True
     fail_closed_on_missing_metadata: bool = True
     cache_ttl_seconds: int = 3600
     pnpm_block_exotic_subdeps: bool = True
@@ -261,6 +263,8 @@ _BOOL_ENV_VARS: dict[str, str] = {
     "enable_pnpm": "SIBERIA_ENABLE_PNPM",
     "enable_npx": "SIBERIA_ENABLE_NPX",
     "enable_uv": "SIBERIA_ENABLE_UV",
+    "enable_bun": "SIBERIA_ENABLE_BUN",
+    "enable_yarn": "SIBERIA_ENABLE_YARN",
     "fail_closed_on_missing_metadata": "SIBERIA_FAIL_CLOSED_ON_MISSING_METADATA",
     "pnpm_block_exotic_subdeps": "SIBERIA_PNPM_BLOCK_EXOTIC_SUBDEPS",
     "pnpm_strict_dep_builds": "SIBERIA_PNPM_STRICT_DEP_BUILDS",
@@ -326,6 +330,8 @@ def load_config(
         "enable_pnpm": _get_bool(data, "enable_pnpm", True),
         "enable_npx": _get_bool(data, "enable_npx", True),
         "enable_uv": _get_bool(data, "enable_uv", True),
+        "enable_bun": _get_bool(data, "enable_bun", True),
+        "enable_yarn": _get_bool(data, "enable_yarn", True),
         "fail_closed_on_missing_metadata": _get_bool(data, "fail_closed_on_missing_metadata", True),
         "cache_ttl_seconds": _get_int(data, "cache_ttl_seconds", 3600),
         "pnpm_block_exotic_subdeps": _get_bool(data, "pnpm_block_exotic_subdeps", True),
@@ -429,6 +435,47 @@ def _write_toml_key(path: Path, key: str, value: str) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _write_toml_section_key(path: Path, section: str, key: str, value: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    output: list[str] = []
+    in_section = False
+    section_found = False
+    key_found = False
+
+    for line in lines:
+        stripped = line.strip()
+        is_section_header = stripped.startswith("[") and stripped.endswith("]")
+
+        if is_section_header:
+            if in_section and not key_found:
+                output.append(f"{key} = {value}")
+                key_found = True
+            current_section = stripped[1:-1].strip()
+            in_section = current_section == section
+            section_found = section_found or in_section
+            output.append(line)
+            continue
+
+        if in_section and "=" in stripped and stripped.split("=", 1)[0].strip() == key:
+            output.append(f"{key} = {value}")
+            key_found = True
+            continue
+
+        output.append(line)
+
+    if section_found:
+        if in_section and not key_found:
+            output.append(f"{key} = {value}")
+    else:
+        if output:
+            output.append("")
+        output.append(f"[{section}]")
+        output.append(f"{key} = {value}")
+
+    path.write_text("\n".join(output) + "\n", encoding="utf-8")
+
+
 def _write_kv_file(path: Path, key: str, value: str) -> None:
     """Idempotently set key=value in a .npmrc-style key=value file."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -444,6 +491,42 @@ def _write_kv_file(path: Path, key: str, value: str) -> None:
     if not found:
         lines.append(f"{key}={value}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_yaml_key(path: Path, key: str, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    found = False
+    terminator_index: int | None = None
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line[:1] in (" ", "\t"):
+                lines.append(line)
+                continue
+            if line.strip() == "...":
+                terminator_index = len(lines)
+                lines.append(line)
+                continue
+            if ":" in line and line.split(":", 1)[0] == key:
+                lines.append(f"{key}: {value}")
+                found = True
+            else:
+                lines.append(line)
+    if not found:
+        if terminator_index is None:
+            lines.append(f"{key}: {value}")
+        else:
+            lines.insert(terminator_index, f"{key}: {value}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _yarn_age_gate(config: AppConfig) -> str:
+    return f"{config.min_age_days}d"
+
+
+def _validate_project_path(project: Path) -> None:
+    if project.exists() and not project.is_dir():
+        raise ValueError(f"--project must point to a directory, got file: {project}")
 
 
 def _read_kv_value(path: Path, key: str) -> str | None:
@@ -474,14 +557,24 @@ def _print_verbose_config_report(lines_by_path: dict[str, list[str]], out: TextI
             print(f"  {line}", file=out)
 
 
-def cmd_config(config: AppConfig, home: Path, out: TextIO, verbosity: int = 0) -> int:
+def cmd_config(
+    config: AppConfig,
+    home: Path,
+    out: TextIO,
+    verbosity: int = 0,
+    project: Path | None = None,
+) -> int:
     verbose = verbosity > 0
+    if project is not None:
+        _validate_project_path(project)
     written: list[str] = []
     verbose_lines: dict[str, list[str]] = {}
     pip_path = home / ".config" / "pip" / "pip.conf"
     uv_path = home / ".config" / "uv" / "uv.toml"
     npm_path = home / ".npmrc"
-    pnpm_path = home / ".config" / "pnpm" / "rc"
+    bun_path = home / ".bunfig.toml"
+    pnpm_path = home / ".config" / "pnpm" / "config.yaml"
+    yarn_path = project / ".yarnrc.yml" if project is not None else home / ".yarnrc.yml"
 
     if config.enable_pip:
         _write_ini_section(pip_path, "global", "uploaded-prior-to", f"P{config.min_age_days}D")
@@ -546,12 +639,27 @@ def cmd_config(config: AppConfig, home: Path, out: TextIO, verbosity: int = 0) -
         _verbose_config_line(verbose_lines, home, npm_path, "skip", "min-release-age", " (tool disabled)")
         _verbose_config_line(verbose_lines, home, npm_path, "skip", "ignore-scripts", " (tool disabled)")
 
+    if config.enable_bun:
+        _write_toml_section_key(bun_path, "install", "minimumReleaseAge", config.min_age_days * 24 * 60 * 60)
+        written.append(str(bun_path))
+        if verbose:
+            _verbose_config_line(
+                verbose_lines,
+                home,
+                bun_path,
+                "write",
+                "install.minimumReleaseAge",
+                f" = {config.min_age_days * 24 * 60 * 60}",
+            )
+    elif verbose:
+        _verbose_config_line(verbose_lines, home, bun_path, "skip", "install.minimumReleaseAge", " (tool disabled)")
+
     if config.enable_pnpm:
-        _write_kv_file(pnpm_path, "minimum-release-age", str(config.min_age_days * 24 * 60))
-        _write_kv_file(pnpm_path, "minimum-release-age-strict", "true")
-        _write_kv_file(
+        _write_yaml_key(pnpm_path, "minimumReleaseAge", str(config.min_age_days * 24 * 60))
+        _write_yaml_key(pnpm_path, "minimumReleaseAgeStrict", "true")
+        _write_yaml_key(
             pnpm_path,
-            "minimum-release-age-ignore-missing-time",
+            "minimumReleaseAgeIgnoreMissingTime",
             "false" if config.fail_closed_on_missing_metadata else "true",
         )
         if verbose:
@@ -560,7 +668,7 @@ def cmd_config(config: AppConfig, home: Path, out: TextIO, verbosity: int = 0) -
                 home,
                 pnpm_path,
                 "write",
-                "minimum-release-age",
+                "minimumReleaseAge",
                 f" = {config.min_age_days * 24 * 60}",
             )
             _verbose_config_line(
@@ -568,7 +676,7 @@ def cmd_config(config: AppConfig, home: Path, out: TextIO, verbosity: int = 0) -
                 home,
                 pnpm_path,
                 "write",
-                "minimum-release-age-strict",
+                "minimumReleaseAgeStrict",
                 " = true",
             )
             _verbose_config_line(
@@ -576,35 +684,51 @@ def cmd_config(config: AppConfig, home: Path, out: TextIO, verbosity: int = 0) -
                 home,
                 pnpm_path,
                 "write",
-                "minimum-release-age-ignore-missing-time",
+                "minimumReleaseAgeIgnoreMissingTime",
                 " = false" if config.fail_closed_on_missing_metadata else " = true",
             )
         if config.pnpm_block_exotic_subdeps:
-            _write_kv_file(pnpm_path, "block-exotic-subdeps", "true")
+            _write_yaml_key(pnpm_path, "blockExoticSubdeps", "true")
             if verbose:
-                _verbose_config_line(verbose_lines, home, pnpm_path, "write", "block-exotic-subdeps", " = true")
+                _verbose_config_line(verbose_lines, home, pnpm_path, "write", "blockExoticSubdeps", " = true")
         elif verbose:
-            _verbose_config_line(verbose_lines, home, pnpm_path, "skip", "block-exotic-subdeps", " (option disabled)")
+            _verbose_config_line(verbose_lines, home, pnpm_path, "skip", "blockExoticSubdeps", " (option disabled)")
         if config.pnpm_strict_dep_builds:
-            _write_kv_file(pnpm_path, "strict-dep-builds", "true")
+            _write_yaml_key(pnpm_path, "strictDepBuilds", "true")
             if verbose:
-                _verbose_config_line(verbose_lines, home, pnpm_path, "write", "strict-dep-builds", " = true")
+                _verbose_config_line(verbose_lines, home, pnpm_path, "write", "strictDepBuilds", " = true")
         elif verbose:
-            _verbose_config_line(verbose_lines, home, pnpm_path, "skip", "strict-dep-builds", " (option disabled)")
+            _verbose_config_line(verbose_lines, home, pnpm_path, "skip", "strictDepBuilds", " (option disabled)")
         written.append(str(pnpm_path))
     elif verbose:
-        _verbose_config_line(verbose_lines, home, pnpm_path, "skip", "minimum-release-age", " (tool disabled)")
-        _verbose_config_line(verbose_lines, home, pnpm_path, "skip", "minimum-release-age-strict", " (tool disabled)")
+        _verbose_config_line(verbose_lines, home, pnpm_path, "skip", "minimumReleaseAge", " (tool disabled)")
+        _verbose_config_line(verbose_lines, home, pnpm_path, "skip", "minimumReleaseAgeStrict", " (tool disabled)")
         _verbose_config_line(
             verbose_lines,
             home,
             pnpm_path,
             "skip",
-            "minimum-release-age-ignore-missing-time",
+            "minimumReleaseAgeIgnoreMissingTime",
             " (tool disabled)",
         )
-        _verbose_config_line(verbose_lines, home, pnpm_path, "skip", "block-exotic-subdeps", " (tool disabled)")
-        _verbose_config_line(verbose_lines, home, pnpm_path, "skip", "strict-dep-builds", " (tool disabled)")
+        _verbose_config_line(verbose_lines, home, pnpm_path, "skip", "blockExoticSubdeps", " (tool disabled)")
+        _verbose_config_line(verbose_lines, home, pnpm_path, "skip", "strictDepBuilds", " (tool disabled)")
+
+    if config.enable_yarn and project is not None:
+        _write_yaml_key(yarn_path, "npmMinimalAgeGate", _yarn_age_gate(config))
+        written.append(str(yarn_path))
+        if verbose:
+            _verbose_config_line(
+                verbose_lines,
+                home,
+                yarn_path,
+                "write",
+                "npmMinimalAgeGate",
+                f" = {_yarn_age_gate(config)}",
+            )
+    elif verbose:
+        detail = " (no project target supplied)" if project is None else " (tool disabled)"
+        _verbose_config_line(verbose_lines, home, yarn_path, "skip", "npmMinimalAgeGate", detail)
 
     if verbose:
         _print_verbose_config_report(verbose_lines, out)
@@ -824,6 +948,29 @@ def _check_pnpm_lock(path: Path, threshold_days: int, now: datetime) -> list[Vio
     return _collect_violations(path, packages, threshold_days, now, _npm_published_at)
 
 
+def _supported_yarn_lock(text: str) -> bool:
+    return bool(re.search(r"(?m)^__metadata:\s*$", text))
+
+
+def _yarn_packages_from_lock_text(text: str) -> list[tuple[str, str]]:
+    packages: list[tuple[str, str]] = []
+    for match in re.finditer(r'(?m)^\s+resolution:\s+"((?:@[^"@]+/)?[^"@]+)@npm:([^":\s]+)(?:::[^"]*)?"\s*$', text):
+        name, version = match.group(1), match.group(2)
+        if name and version:
+            packages.append((name, version))
+    return packages
+
+
+def _check_yarn_lock(path: Path, threshold_days: int, now: datetime) -> list[Violation]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return []
+    if not _supported_yarn_lock(text):
+        raise ValueError(f"unsupported yarn.lock format: {path}")
+    return _collect_violations(path, _yarn_packages_from_lock_text(text), threshold_days, now, _npm_published_at)
+
+
 def _check_bun_lock(path: Path, threshold_days: int, now: datetime) -> list[Violation]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -1003,6 +1150,7 @@ _LOCKFILE_CHECKERS = {
     "package-lock.json": _check_package_lock,
     "npm-shrinkwrap.json": _check_npm_shrinkwrap,
     "pnpm-lock.yaml": _check_pnpm_lock,
+    "yarn.lock": _check_yarn_lock,
     "bun.lock": _check_bun_lock,
     "deno.lock": _check_deno_lock,
     "requirements.txt": _check_requirements_txt,
@@ -1028,6 +1176,7 @@ def cmd_audit_lock(
     _load_persistent_cache(now, config.cache_ttl_seconds)
     _CURRENT_CTIME_THRESHOLD_DAYS = threshold if use_ctime else 0
     _CURRENT_AGE_THRESHOLD_DAYS = threshold
+    skipped_unsupported = False
 
     if scan:
         targets = _scan_lockfile_targets(Path("."))
@@ -1052,7 +1201,16 @@ def cmd_audit_lock(
             continue
         _verbose_check(err, verbosity, 1, f"audit-lock: starting {target}")
         started = time.perf_counter()
-        violations = checker(target, threshold, now)
+        try:
+            violations = checker(target, threshold, now)
+        except ValueError as exc:
+            if target.name != "yarn.lock" or not str(exc).startswith("unsupported yarn.lock format:"):
+                raise
+            skipped_unsupported = True
+            elapsed = time.perf_counter() - started
+            print(f"siberia audit-lock: {exc}", file=err)
+            _verbose_check(err, verbosity, 2, f"audit-lock: finished {target} in {elapsed:.2f}s")
+            continue
         elapsed = time.perf_counter() - started
         print(_status_line(out, target, ok=not violations), file=out)
         for violation in violations:
@@ -1061,13 +1219,12 @@ def cmd_audit_lock(
         if verbosity >= 3:
             for violation in violations:
                 registry = "pypi"
-                if target.name in {"package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "bun.lock", "deno.lock"}:
+                if target.name in {"package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "deno.lock"}:
                     registry = "npm"
                 elif target.name == "Cargo.lock":
                     registry = "crates"
                 _verbose_check(err, verbosity, 3, f"lookup: {registry} {violation.package}@{violation.version}")
-        if violations:
-            all_violations.extend(violations)
+        all_violations.extend(violations)
 
     if all_violations:
         print(
@@ -1076,6 +1233,9 @@ def cmd_audit_lock(
             file=err,
         )
         return 1
+
+    if skipped_unsupported:
+        return 0
 
     print(f"siberia audit-lock: all packages meet the {threshold}-day age requirement", file=out)
     return 0
@@ -1127,6 +1287,13 @@ def main(
         default=0,
         help="Increase verbosity; repeat for more detail",
     )
+    config_parser.add_argument(
+        "--project",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Write project-local config files for the supplied project path",
+    )
 
     audit_lock_parser = subparsers.add_parser("audit-lock", help="Audit lockfiles for too-new packages")
     audit_lock_parser.add_argument("files", nargs="*", help="Lockfiles to check")
@@ -1171,7 +1338,11 @@ def main(
 
     if args.command == "config":
         home = Path(active_env.get("HOME", str(Path.home())))
-        return cmd_config(config, home, active_out, verbosity=args.verbose)
+        try:
+            return cmd_config(config, home, active_out, verbosity=args.verbose, project=args.project)
+        except ValueError as exc:
+            print(f"siberia: {exc}", file=active_err)
+            return 1
 
     if args.command == "audit-lock":
         return cmd_audit_lock(

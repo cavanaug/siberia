@@ -2,7 +2,7 @@
 
 > All new packages are frozen like a cold Siberian winter, but you control the thaw rate...
 
-**Supply-chain hardening for common Python, npm, Deno, Bun, pnpm, and Cargo lockfile auditing.**
+**Supply-chain hardening for common Python, npm, Yarn, Deno, Bun, pnpm, and Cargo lockfile auditing.**
 
 Siberia enforces a minimum-age policy on packages pulled from external repositories. Before a newly published package can enter your
 environment, it must have existed in the registry for at least N days. This one constraint eliminates an entire class of attack.
@@ -141,6 +141,10 @@ By default, `siberia shellenv` exports:
 - `pnpm_config_minimum_release_age=10080` — same for pnpm (in minutes)
 - `pnpm_config_block_exotic_subdeps=true` — blocks transitive pnpm dependencies from using exotic sources like git or tarball URLs
 
+Bun is not included in `shellenv` yet because Bun's documented age-gate interface is `bunfig.toml` and CLI flags; Siberia's Bun hardening currently lives in `siberia config`.
+
+Yarn is also not included in `shellenv`. Siberia manages Yarn's native age gate only through project-local config written by `siberia config --project PATH` to `PATH/.yarnrc.yml`.
+
 Optional exports are included only when their matching config flags are enabled:
 
 - `npm_config_ignore_scripts=true` — optional npm and npx hardening that blocks dependency lifecycle scripts broadly
@@ -154,11 +158,12 @@ sourced (CI, Docker, subprocess invocations):
 ```sh
 siberia config
 siberia config --age 14d
+siberia config --project PATH
 siberia config -v
 siberia config -vv
 ```
 
-Writes to: `~/.config/pip/pip.conf`, `~/.config/uv/uv.toml`, `~/.npmrc`, `~/.config/pnpm/rc`. All writes are idempotent.
+Writes to: `~/.config/pip/pip.conf`, `~/.config/uv/uv.toml`, `~/.bunfig.toml`, `~/.npmrc`, `~/.config/pnpm/config.yaml`, and, when `config --project PATH` is used, `PATH/.yarnrc.yml`. All writes are idempotent.
 
 Use counted verbosity on `config` to list the managed fields grouped by target file, including both injected values and fields skipped
 because a tool or option is disabled. `-v`, `-vv`, and `-vvv` are accepted, although `config` currently uses verbosity as a simple on/off
@@ -169,29 +174,34 @@ Additional hardening written by `siberia config`:
 - pnpm enables `block-exotic-subdeps=true` by default
 - pnpm can opt into `strict-dep-builds=true`
 - npm and npx can opt into `ignore-scripts=true`
+- Yarn writes project-local `npmMinimalAgeGate` to `PATH/.yarnrc.yml` when `--project PATH` is supplied
+
+For Bun, Siberia writes `[install].minimumReleaseAge` to `~/.bunfig.toml`.
+
+For Yarn, Siberia writes `npmMinimalAgeGate` to the target project's `.yarnrc.yml`. This is intentionally project-local config, not a `shellenv` export.
 
 If `.npmrc` already contains an explicit `ignore-scripts` setting and Siberia is not configured to manage it, Siberia leaves that user
 choice in place and prints a warning instead of overriding it.
 
-### `siberia check`
+### `siberia audit-lock`
 
 Audits lockfiles for packages that are younger than the age threshold, fetching publish timestamps from registry APIs:
 
 ```sh
-siberia check                          # checks known lockfiles in current directory
-siberia check package-lock.json        # explicit file
-siberia check --scan                   # recursively scan the project tree
-siberia check --scan --age 30d         # stricter threshold for audit
-siberia check --scan -vv               # show discovery, per-file progress, and timings
-siberia check --scan --use-ctime       # optional aggressive local-artifact shortcut
+siberia audit-lock                     # checks known lockfiles in current directory
+siberia audit-lock package-lock.json   # explicit file
+siberia audit-lock --scan              # recursively scan the project tree
+siberia audit-lock --scan --age 30d    # stricter threshold for audit
+siberia audit-lock --scan -vv          # show discovery, per-file progress, and timings
+siberia audit-lock --scan --use-ctime  # optional aggressive local-artifact shortcut
 ```
 
-`check` now reports incremental per-file progress while it runs:
+`audit-lock` now reports incremental per-file progress while it runs:
 
 - TTY output uses colored `✓` / `✗`
 - non-TTY output uses `OK` / `X`
 
-Counted verbosity on `check`:
+Counted verbosity on `audit-lock`:
 
 - `-v`: scan discovery and per-file start logs
 - `-vv`: per-file elapsed time
@@ -204,6 +214,7 @@ Supported lockfiles:
 | `package-lock.json` | registry.npmjs.org |
 | `npm-shrinkwrap.json` | registry.npmjs.org |
 | `pnpm-lock.yaml` | registry.npmjs.org |
+| `yarn.lock` | registry.npmjs.org |
 | `bun.lock` | registry.npmjs.org |
 | `deno.lock` | registry.npmjs.org for `npm:` entries |
 | `requirements.txt` | pypi.org |
@@ -214,12 +225,13 @@ Supported lockfiles:
 
 Notes:
 
+- `yarn.lock` auditing supports modern Yarn lockfiles only.
 - `deno.lock` currently audits `npm:` packages only, not `jsr:` packages.
 - Bun support is for text `bun.lock` files, not legacy binary `bun.lockb`.
 - `Pipfile.lock` audits both `default` and `develop` sections.
 - `Cargo.lock` metadata is cached and prefetched per crate where possible, but large cold Rust dependency sets can still be slower than other ecosystems.
 
-Persistent `check` cache:
+Persistent `audit-lock` cache:
 
 - `XDG_CACHE_HOME/siberia/check-cache.json`
 - fallback: `~/.cache/siberia/check-cache.json`
@@ -270,7 +282,7 @@ uv tool install siberia
 ### One-shot use with `uvx`
 
 ```sh
-uvx siberia check --scan
+uvx siberia audit-lock --scan
 ```
 
 ### Install from a published GitHub release artifact
@@ -290,7 +302,7 @@ GitHub Releases are the canonical published artifacts. Other distribution channe
 ### From this repo
 
 ```sh
-python3 siberia shellenv
+python -m siberia.cli shellenv
 ```
 
 CI and release automation run on standard GitHub-hosted runners. No self-hosted runner setup is required for normal testing, build validation, or tagged release publication.
@@ -317,6 +329,8 @@ enable_npm   = true
 enable_pnpm  = true
 enable_npx   = true
 enable_uv    = true
+enable_bun   = true
+enable_yarn = true
 fail_closed_on_missing_metadata = true
 pnpm_block_exotic_subdeps = true
 pnpm_strict_dep_builds = false
@@ -331,21 +345,57 @@ All fields can be overridden via environment variables:
 ```sh
 SIBERIA_MIN_AGE_DAYS=14
 SIBERIA_ENABLE_NPM=0
+SIBERIA_ENABLE_YARN=0
 SIBERIA_FAIL_CLOSED_ON_MISSING_METADATA=false
 ```
 
 The `--age` flag on any subcommand overrides both the config file and environment variables for that invocation.
 
+## Native Capability Matrix
+
+| Tool | Native setting | Unit | Siberia target | Notes |
+|------|----------------|------|----------------|-------|
+| `pip` / `pipx` | `uploaded-prior-to` | ISO-8601 duration | `~/.config/pip/pip.conf` | Age-gate only |
+| `uv` / `uvx` | `exclude-newer` | ISO-8601 duration | `~/.config/uv/uv.toml` | Age-gate only |
+| `bun` | `minimumReleaseAge` | seconds | `~/.bunfig.toml` | Config-file support in Siberia |
+| `npm` / `npx` | `min-release-age` | days | `~/.npmrc` | Shared npm surface; optional `ignore-scripts` |
+| `pnpm` | `minimumReleaseAge` | minutes | `~/.config/pnpm/config.yaml` | Also `blockExoticSubdeps`; optional `strictDepBuilds` |
+| `yarn` | `npmMinimalAgeGate` | days | `PATH/.yarnrc.yml` | Project-local via `siberia config --project PATH`; no `shellenv` export |
+
 ## Native Capability Differences
 
-- `pnpm` has the strongest native hardening surface in this set: release-age gating, exotic-source blocking, and opt-in strict dependency
-  build blocking.
-- `npm` supports release-age gating and an opt-in but blunt `ignore-scripts` mode, but not pnpm-style exotic-transitive blocking or
-  per-dependency build approvals.
+- `pnpm` has the strongest native hardening surface in this set: release-age gating, exotic-source blocking, and a project-scoped build approval workflow.
+- `npm` supports release-age gating and an opt-in but blunt `ignore-scripts` mode, but not pnpm-style exotic-transitive blocking or per-dependency build approvals.
+- `yarn` supports `npmMinimalAgeGate`, and Siberia writes it only to the target project's `.yarnrc.yml` via `config --project PATH`.
+- `bun` supports release-age gating natively and package-level trust via `trustedDependencies`, but Siberia currently only configures Bun's age gate.
 - `pip` and `uv` currently provide age-based controls, but not the same class of native script-approval or exotic-source restrictions.
 - `npm` and `npx` share the same native npm config surface, so Siberia's npm-native settings affect both tools.
-- `siberia check` also audits `Cargo.lock` against crates.io publish dates, but Siberia does not yet configure Cargo's install behavior the
-  way it configures pip, uv, npm, and pnpm.
+- `siberia audit-lock` also audits `Cargo.lock` against crates.io publish dates, but Siberia does not yet configure Cargo's install behavior the way it configures pip, uv, Bun, npm, pnpm, and Yarn.
+
+Yarn config is project-local rather than shell-local: use `siberia config --project PATH` when you want Siberia to manage `PATH/.yarnrc.yml`.
+
+pnpm's per-package build approvals live in `pnpm-workspace.yaml` and `pnpm approve-builds`; Siberia does not automate that project-scoped workflow.
+
+---
+
+## Dependabot Alignment
+
+If you use age gating for npm dependencies, configure your update bot to wait at least as long as Siberia does. Otherwise Dependabot can open PRs for versions that `npm install` will still reject.
+
+Example `.github/dependabot.yml`:
+
+```yaml
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+```
+
+Use the same number of days as your Siberia age policy.
 
 ---
 
@@ -353,20 +403,10 @@ The `--age` flag on any subcommand overrides both the config file and environmen
 
 Areas that would make Siberia more useful over time:
 
-- Cargo integration beyond lockfile auditing: today `siberia check` can audit `Cargo.lock`, but Siberia does not yet manage Cargo-native
-  install policy. Extending Siberia to configure Rust workflows more directly is a likely next step.
-- Go modules support: add auditing and, where feasible, native policy integration for `go.mod` and `go.sum` workflows.
-- Richer `siberia check` reporting: audit lockfiles against policy and optionally show the age of every resolved dependency, not just
-  violations. That could grow into an explicit CLI mode for lockfile age reporting.
-- Local cache inspection: review already-downloaded package-manager caches such as pnpm stores, npm caches, or Python tool caches and warn
-  when locally available artifacts are newer than the configured age threshold. This would help detect cases where something outside the
-  normal install path populated the cache.
-- Private registry policy: enterprises often need different rules for internal packages than for public internet packages. For example, a
-  company may want no cooling-off period for its private npm registry but still require one for packages from the public npm ecosystem.
-  Handling that cleanly across package managers is still an open problem and needs more research.
-
-Siberia should keep following the ecosystems forward: adopt new native controls when they appear, expose them coherently, and make safe
-defaults accessible to people who are not packaging-tool experts.
+- Richer `siberia audit-lock` reporting: audit lockfiles against policy and optionally show the age of every resolved dependency, not just violations.
+- Broader Yarn coverage: extend auditing beyond the currently supported modern Yarn lockfiles if older formats can be handled safely.
+- Trust-policy research: newer package-manager trust and provenance controls such as pnpm `trustPolicy` may become good future additions once they are stable enough to expose cleanly.
+- Private registry policy: enterprises often need different rules for internal packages than for public internet packages.
 
 ---
 

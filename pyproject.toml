@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "siberia"
 version = "0.4.0"
-description = "Supply-chain hardening for pip, uv, npm, pnpm, and Cargo"
+description = "Supply-chain hardening and lockfile auditing for pip, uv, npm, pnpm, Bun, Deno, and Cargo"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [
   { name = "Cavanaug" },
 ]
-keywords = ["security", "supply-chain", "cli", "uv", "npm", "pnpm", "pip", "cargo"]
+keywords = ["security", "supply-chain", "cli", "uv", "npm", "pnpm", "bun", "deno", "pip", "cargo"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",

@@ -36,6 +36,42 @@ class PackageImportTests(unittest.TestCase):
         self.assertEqual(module.__version__, "0.4.0")
         self.assertEqual(__version__, "0.4.0")
 
+    def test_module_cli_is_runnable_from_repo_root(self) -> None:
+        env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+        import_result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import pathlib, siberia, siberia.cli; "
+                    "print(pathlib.Path(siberia.__file__).resolve()); "
+                    "print(pathlib.Path(siberia.cli.__file__).resolve())"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            cwd=str(ROOT),
+            env=env,
+            check=True,
+        )
+        result = subprocess.run(
+            [sys.executable, "-m", "siberia.cli", "shellenv", "--age", "7d"],
+            capture_output=True,
+            text=True,
+            cwd=str(ROOT),
+            env=env,
+        )
+
+        self.assertEqual(
+            import_result.stdout.splitlines(),
+            [
+                str((ROOT / "siberia" / "__init__.py").resolve()),
+                str((ROOT / "siberia" / "cli.py").resolve()),
+            ],
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("export PIP_UPLOADED_PRIOR_TO=P7D", result.stdout)
+
     def test_importing_package_does_not_preload_cli_module(self) -> None:
         result = subprocess.run(
             [
@@ -91,6 +127,59 @@ class ReleaseDocsTests(unittest.TestCase):
         self.assertTrue((ROOT / "docs/homebrew/siberia.rb").exists())
 
 
+class DocumentationCoverageTests(unittest.TestCase):
+    def test_readme_mentions_repo_root_module_entrypoint(self) -> None:
+        content = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("python -m siberia.cli shellenv", content)
+
+    def test_readme_mentions_audit_lock_command(self) -> None:
+        content = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("siberia audit-lock", content)
+        self.assertIn("uvx siberia audit-lock --scan", content)
+        self.assertIn("Persistent `audit-lock` cache", content)
+        self.assertNotIn("Persistent `check` cache", content)
+
+    def test_readme_mentions_enable_yarn_config_flag(self) -> None:
+        content = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("enable_yarn = true", content)
+        self.assertIn("SIBERIA_ENABLE_YARN=0", content)
+
+    def test_readme_mentions_yarn_native_capability(self) -> None:
+        content = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("yarn.lock", content)
+        self.assertIn("npmMinimalAgeGate", content)
+        self.assertIn("modern Yarn lockfiles", content)
+
+    def test_readme_mentions_yarn_project_config_boundary(self) -> None:
+        content = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("config --project PATH", content)
+        self.assertIn("PATH/.yarnrc.yml", content)
+
+    def test_readme_mentions_bun_native_minimum_release_age(self) -> None:
+        content = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("~/.bunfig.toml", content)
+        self.assertIn("minimumReleaseAge", content)
+
+    def test_readme_mentions_dependabot_cooldown_alignment(self) -> None:
+        content = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("Dependabot", content)
+        self.assertIn("cooldown", content)
+        self.assertIn("default-days", content)
+        self.assertIn(".github/dependabot.yml", content)
+
+    def test_readme_mentions_pnpm_config_yaml(self) -> None:
+        content = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("~/.config/pnpm/config.yaml", content)
+
+    def test_readme_mentions_native_capability_matrix(self) -> None:
+        content = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("uploaded-prior-to", content)
+        self.assertIn("min-release-age", content)
+        self.assertIn("minimumReleaseAge", content)
+        self.assertIn("~/.bunfig.toml", content)
+        self.assertIn("~/.config/pnpm/config.yaml", content)
+
+
 class LoadConfigTests(unittest.TestCase):
     def test_default_config_path_uses_siberia_namespace(self) -> None:
         self.assertEqual(
@@ -123,6 +212,18 @@ class LoadConfigTests(unittest.TestCase):
         self.assertTrue(config.pnpm_block_exotic_subdeps)
         self.assertFalse(config.pnpm_strict_dep_builds)
         self.assertFalse(config.npm_ignore_scripts)
+
+    def test_load_config_defaults_enable_bun(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = load_config(Path(temp_dir) / "missing.toml")
+
+        self.assertTrue(config.enable_bun)
+
+    def test_load_config_defaults_enable_yarn(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = load_config(Path(temp_dir) / "missing.toml")
+
+        self.assertTrue(config.enable_yarn)
 
     def test_load_config_reads_values_from_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -166,6 +267,24 @@ class LoadConfigTests(unittest.TestCase):
         self.assertFalse(config.pnpm_block_exotic_subdeps)
         self.assertTrue(config.pnpm_strict_dep_builds)
         self.assertTrue(config.npm_ignore_scripts)
+
+    def test_load_config_reads_enable_bun_from_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text("enable_bun = false\n", encoding="utf-8")
+
+            config = load_config(config_path)
+
+        self.assertFalse(config.enable_bun)
+
+    def test_load_config_reads_enable_yarn_from_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text("enable_yarn = false\n", encoding="utf-8")
+
+            config = load_config(config_path)
+
+        self.assertFalse(config.enable_yarn)
 
     def test_load_config_rejects_invalid_boolean_types(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -246,6 +365,24 @@ class LoadConfigTests(unittest.TestCase):
         self.assertFalse(config.pnpm_block_exotic_subdeps)
         self.assertTrue(config.pnpm_strict_dep_builds)
         self.assertTrue(config.npm_ignore_scripts)
+
+    def test_env_var_overrides_enable_bun(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = load_config(
+                Path(temp_dir) / "missing.toml",
+                env={"SIBERIA_ENABLE_BUN": "0"},
+            )
+
+        self.assertFalse(config.enable_bun)
+
+    def test_env_var_overrides_enable_yarn(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = load_config(
+                Path(temp_dir) / "missing.toml",
+                env={"SIBERIA_ENABLE_YARN": "0"},
+            )
+
+        self.assertFalse(config.enable_yarn)
 
     def test_env_var_accepts_true_values(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -353,19 +490,41 @@ class ConfigSubcommandTests(unittest.TestCase):
             self.assertIn("~/.npmrc", content)
             self.assertIn("[write] min-release-age = 7", content)
             self.assertIn("[skip] ignore-scripts (option disabled)", content)
-            self.assertIn("~/.config/pnpm/rc", content)
-            self.assertIn("[write] minimum-release-age = 10080", content)
-            self.assertIn("[write] minimum-release-age-strict = true", content)
-            self.assertIn("[write] minimum-release-age-ignore-missing-time = false", content)
-            self.assertIn("[write] block-exotic-subdeps = true", content)
-            self.assertIn("[skip] strict-dep-builds (option disabled)", content)
+            self.assertIn("~/.bunfig.toml", content)
+            self.assertIn("[write] install.minimumReleaseAge = 604800", content)
+            self.assertIn("~/.config/pnpm/config.yaml", content)
+            self.assertIn("[write] minimumReleaseAge = 10080", content)
+            self.assertIn("[write] minimumReleaseAgeStrict = true", content)
+            self.assertIn("[write] minimumReleaseAgeIgnoreMissingTime = false", content)
+            self.assertIn("[write] blockExoticSubdeps = true", content)
+            self.assertIn("[skip] strictDepBuilds (option disabled)", content)
+
+    def test_config_verbose_reports_yarn_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            project = home / "project"
+            project.mkdir()
+            out = io.StringIO()
+
+            cmd_config(AppConfig(), home, out, verbosity=1, project=project)
+
+            content = out.getvalue()
+            self.assertIn(str(project / ".yarnrc.yml"), content)
+            self.assertIn("[write] npmMinimalAgeGate = 7d", content)
 
     def test_config_verbose_lists_skipped_fields_for_disabled_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             out = io.StringIO()
             cmd_config(
-                AppConfig(enable_pip=False, enable_npm=False, enable_npx=False, enable_uv=False, enable_pnpm=False),
+                AppConfig(
+                    enable_pip=False,
+                    enable_npm=False,
+                    enable_npx=False,
+                    enable_uv=False,
+                    enable_bun=False,
+                    enable_pnpm=False,
+                ),
                 home,
                 out,
                 verbosity=1,
@@ -378,12 +537,135 @@ class ConfigSubcommandTests(unittest.TestCase):
             self.assertIn("~/.npmrc", content)
             self.assertIn("[skip] min-release-age (tool disabled)", content)
             self.assertIn("[skip] ignore-scripts (tool disabled)", content)
-            self.assertIn("~/.config/pnpm/rc", content)
-            self.assertIn("[skip] minimum-release-age (tool disabled)", content)
-            self.assertIn("[skip] minimum-release-age-strict (tool disabled)", content)
-            self.assertIn("[skip] minimum-release-age-ignore-missing-time (tool disabled)", content)
-            self.assertIn("[skip] block-exotic-subdeps (tool disabled)", content)
-            self.assertIn("[skip] strict-dep-builds (tool disabled)", content)
+            self.assertIn("~/.bunfig.toml", content)
+            self.assertIn("[skip] install.minimumReleaseAge (tool disabled)", content)
+            self.assertIn("~/.config/pnpm/config.yaml", content)
+            self.assertIn("[skip] minimumReleaseAge (tool disabled)", content)
+            self.assertIn("[skip] minimumReleaseAgeStrict (tool disabled)", content)
+            self.assertIn("[skip] minimumReleaseAgeIgnoreMissingTime (tool disabled)", content)
+            self.assertIn("[skip] blockExoticSubdeps (tool disabled)", content)
+            self.assertIn("[skip] strictDepBuilds (tool disabled)", content)
+
+    def test_config_writes_bunfig(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            cmd_config(AppConfig(min_age_days=7), home, io.StringIO())
+            content = (home / ".bunfig.toml").read_text(encoding="utf-8")
+            self.assertIn("[install]", content)
+            self.assertIn("minimumReleaseAge = 604800", content)
+
+    def test_config_updates_existing_bunfig_value(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            cmd_config(AppConfig(min_age_days=7), home, io.StringIO())
+            cmd_config(AppConfig(min_age_days=14), home, io.StringIO())
+            content = (home / ".bunfig.toml").read_text(encoding="utf-8")
+            self.assertIn("minimumReleaseAge = 1209600", content)
+            self.assertNotIn("minimumReleaseAge = 604800", content)
+
+    def test_config_updates_bunfig_without_touching_near_match_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            bunfig = home / ".bunfig.toml"
+            bunfig.write_text(
+                "[install]\nminimumReleaseAgeExtra = 42\nminimumReleaseAge = 604800\n",
+                encoding="utf-8",
+            )
+
+            cmd_config(AppConfig(min_age_days=14), home, io.StringIO())
+
+            content = bunfig.read_text(encoding="utf-8")
+            self.assertIn("minimumReleaseAgeExtra = 42", content)
+            self.assertIn("minimumReleaseAge = 1209600", content)
+            self.assertNotIn("minimumReleaseAgeExtra = 1209600", content)
+
+    def test_config_skips_bunfig_when_bun_is_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            cmd_config(AppConfig(enable_bun=False), home, io.StringIO())
+            self.assertFalse((home / ".bunfig.toml").exists())
+
+    def test_config_writes_yarnrc_when_project_target_is_supplied(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            project = home / "project"
+            project.mkdir()
+
+            cmd_config(AppConfig(min_age_days=7), home, io.StringIO(), project=project)
+
+            content = (project / ".yarnrc.yml").read_text(encoding="utf-8")
+            self.assertIn("npmMinimalAgeGate: 7d", content)
+
+    def test_config_updates_existing_yarnrc_value(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            project = home / "project"
+            project.mkdir()
+
+            cmd_config(AppConfig(min_age_days=7), home, io.StringIO(), project=project)
+            cmd_config(AppConfig(min_age_days=14), home, io.StringIO(), project=project)
+
+            content = (project / ".yarnrc.yml").read_text(encoding="utf-8")
+            self.assertIn("npmMinimalAgeGate: 14d", content)
+            self.assertNotIn("npmMinimalAgeGate: 7d", content)
+
+    def test_config_preserves_unrelated_yarn_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            project = home / "project"
+            project.mkdir()
+            yarnrc = project / ".yarnrc.yml"
+            yarnrc.write_text(
+                "nodeLinker: node-modules\nnpmRegistries:\n  //registry.npmjs.org:\n    npmAuthToken: secret\nnpmMinimalAgeGate: 1d\n",
+                encoding="utf-8",
+            )
+
+            cmd_config(AppConfig(min_age_days=7), home, io.StringIO(), project=project)
+
+            content = yarnrc.read_text(encoding="utf-8")
+            self.assertIn("nodeLinker: node-modules\n", content)
+            self.assertIn("npmRegistries:\n", content)
+            self.assertIn("  //registry.npmjs.org:\n", content)
+            self.assertIn("    npmAuthToken: secret\n", content)
+            self.assertIn("npmMinimalAgeGate: 7d\n", content)
+            self.assertNotIn("npmMinimalAgeGate: 1d\n", content)
+
+    def test_config_updates_yarnrc_before_yaml_terminator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            project = home / "project"
+            project.mkdir()
+            yarnrc = project / ".yarnrc.yml"
+            yarnrc.write_text("nodeLinker: node-modules\n...\n", encoding="utf-8")
+
+            cmd_config(AppConfig(min_age_days=7), home, io.StringIO(), project=project)
+
+            self.assertEqual(
+                yarnrc.read_text(encoding="utf-8"),
+                "nodeLinker: node-modules\nnpmMinimalAgeGate: 7d\n...\n",
+            )
+
+    def test_config_skips_yarn_when_no_project_target_is_supplied(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            out = io.StringIO()
+
+            cmd_config(AppConfig(), home, out, verbosity=1)
+
+            self.assertFalse((home / ".yarnrc.yml").exists())
+            self.assertIn("[skip] npmMinimalAgeGate (no project target supplied)", out.getvalue())
+
+    def test_config_skips_yarn_when_disabled_even_with_project_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            project = home / "project"
+            project.mkdir()
+            out = io.StringIO()
+
+            cmd_config(AppConfig(enable_yarn=False), home, out, verbosity=1, project=project)
+
+            self.assertFalse((project / ".yarnrc.yml").exists())
+            self.assertIn("[skip] npmMinimalAgeGate (tool disabled)", out.getvalue())
 
     def test_config_writes_pip_conf(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -455,63 +737,91 @@ class ConfigSubcommandTests(unittest.TestCase):
             self.assertIn("min-release-age=7", content)
             self.assertIn("ignore-scripts=true", content)
 
-    def test_config_writes_pnpm_rc(self) -> None:
+    def test_config_writes_pnpm_yaml_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             cmd_config(AppConfig(min_age_days=7), home, io.StringIO())
-            content = (home / ".config" / "pnpm" / "rc").read_text()
-            self.assertIn("minimum-release-age=10080", content)
+            content = (home / ".config" / "pnpm" / "config.yaml").read_text(encoding="utf-8")
+            self.assertIn("minimumReleaseAge: 10080", content)
+            self.assertIn("minimumReleaseAgeStrict: true", content)
+            self.assertIn("minimumReleaseAgeIgnoreMissingTime: false", content)
+            self.assertIn("blockExoticSubdeps: true", content)
 
     def test_config_writes_pnpm_minimum_release_age_strict(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             cmd_config(AppConfig(), home, io.StringIO())
-            content = (home / ".config" / "pnpm" / "rc").read_text()
-            self.assertIn("minimum-release-age-strict=true", content)
+            content = (home / ".config" / "pnpm" / "config.yaml").read_text()
+            self.assertIn("minimumReleaseAgeStrict: true", content)
 
     def test_config_writes_pnpm_fail_closed_ignore_missing_time_false_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             cmd_config(AppConfig(), home, io.StringIO())
-            content = (home / ".config" / "pnpm" / "rc").read_text()
-            self.assertIn("minimum-release-age-ignore-missing-time=false", content)
+            content = (home / ".config" / "pnpm" / "config.yaml").read_text()
+            self.assertIn("minimumReleaseAgeIgnoreMissingTime: false", content)
 
     def test_config_writes_pnpm_fail_open_ignore_missing_time_true(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             cmd_config(AppConfig(fail_closed_on_missing_metadata=False), home, io.StringIO())
-            content = (home / ".config" / "pnpm" / "rc").read_text()
-            self.assertIn("minimum-release-age-ignore-missing-time=true", content)
+            content = (home / ".config" / "pnpm" / "config.yaml").read_text()
+            self.assertIn("minimumReleaseAgeIgnoreMissingTime: true", content)
 
     def test_config_writes_pnpm_block_exotic_subdeps(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             cmd_config(AppConfig(), home, io.StringIO())
-            content = (home / ".config" / "pnpm" / "rc").read_text()
-            self.assertIn("block-exotic-subdeps=true", content)
+            content = (home / ".config" / "pnpm" / "config.yaml").read_text()
+            self.assertIn("blockExoticSubdeps: true", content)
+
+    def test_config_updates_top_level_pnpm_key_without_touching_nested_yaml(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            pnpm_config = home / ".config" / "pnpm" / "config.yaml"
+            pnpm_config.parent.mkdir(parents=True, exist_ok=True)
+            pnpm_config.write_text(
+                "\n".join([
+                    "registries:",
+                    '  "//registry.npmjs.org/":',
+                    "    tokenHelper: /usr/local/bin/helper",
+                    "minimumReleaseAge: 1",
+                ])
+                + "\n",
+                encoding="utf-8",
+            )
+
+            cmd_config(AppConfig(min_age_days=7), home, io.StringIO())
+
+            content = pnpm_config.read_text(encoding="utf-8")
+            self.assertIn("registries:\n", content)
+            self.assertIn('  "//registry.npmjs.org/":\n', content)
+            self.assertIn("    tokenHelper: /usr/local/bin/helper\n", content)
+            self.assertIn("minimumReleaseAge: 10080\n", content)
+            self.assertNotIn("minimumReleaseAge: 1\n", content)
 
     def test_config_omits_pnpm_strict_dep_builds_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             cmd_config(AppConfig(), home, io.StringIO())
-            content = (home / ".config" / "pnpm" / "rc").read_text()
-            self.assertNotIn("strict-dep-builds=true", content)
+            content = (home / ".config" / "pnpm" / "config.yaml").read_text()
+            self.assertNotIn("strictDepBuilds: true", content)
 
     def test_config_writes_pnpm_strict_dep_builds_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             cmd_config(AppConfig(pnpm_strict_dep_builds=True), home, io.StringIO())
-            content = (home / ".config" / "pnpm" / "rc").read_text()
-            self.assertIn("strict-dep-builds=true", content)
+            content = (home / ".config" / "pnpm" / "config.yaml").read_text()
+            self.assertIn("strictDepBuilds: true", content)
 
-    def test_config_is_idempotent_for_pnpm_rc(self) -> None:
+    def test_config_is_idempotent_for_pnpm_yaml_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             cmd_config(AppConfig(), home, io.StringIO())
             cmd_config(AppConfig(), home, io.StringIO())
-            content = (home / ".config" / "pnpm" / "rc").read_text()
-            self.assertEqual(content.count("minimum-release-age-strict"), 1)
-            self.assertEqual(content.count("minimum-release-age-ignore-missing-time"), 1)
+            content = (home / ".config" / "pnpm" / "config.yaml").read_text()
+            self.assertEqual(content.count("minimumReleaseAgeStrict"), 1)
+            self.assertEqual(content.count("minimumReleaseAgeIgnoreMissingTime"), 1)
 
     def test_config_is_idempotent_for_npmrc(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -582,6 +892,40 @@ class MainSubcommandTests(unittest.TestCase):
                 rc = main(["config", "-vv"], env={"HOME": tmp}, out=out)
             self.assertEqual(rc, 0)
             self.assertIn("[write] global.uploaded-prior-to = P7D", out.getvalue())
+
+    def test_main_config_accepts_project_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            project = home / "project"
+            project.mkdir()
+            out = io.StringIO()
+
+            with patch("siberia.cli.load_config", return_value=AppConfig()):
+                rc = main(["config", "--project", str(project)], env={"HOME": tmp}, out=out)
+
+            self.assertEqual(rc, 0)
+            self.assertTrue((project / ".yarnrc.yml").exists())
+
+    def test_main_config_rejects_file_project_path_cleanly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            project_file = home / "project-file"
+            project_file.write_text("not a directory\n", encoding="utf-8")
+            out = io.StringIO()
+            err = io.StringIO()
+
+            with patch("siberia.cli.load_config", return_value=AppConfig()):
+                rc = main(["config", "--project", str(project_file)], env={"HOME": tmp}, out=out, err=err)
+
+            self.assertEqual(rc, 1)
+            self.assertEqual(out.getvalue(), "")
+            self.assertIn("siberia:", err.getvalue())
+            self.assertIn("--project", err.getvalue())
+            self.assertFalse((home / ".config" / "pip" / "pip.conf").exists())
+            self.assertFalse((home / ".config" / "uv" / "uv.toml").exists())
+            self.assertFalse((home / ".npmrc").exists())
+            self.assertFalse((home / ".bunfig.toml").exists())
+            self.assertFalse((home / ".config" / "pnpm" / "config.yaml").exists())
 
     def test_main_audit_lock_accepts_counted_verbose_flags(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -742,6 +1086,87 @@ class CheckCommandTests(unittest.TestCase):
 
         self.assertEqual([(item.package, item.version) for item in violations], [("react", "19.0.0")])
 
+    def test_cmd_audit_lock_supports_modern_yarn_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lockfile = root / "yarn.lock"
+            lockfile.write_text(
+                "\n".join([
+                    "__metadata:",
+                    '  version: 8',
+                    '  cacheKey: 10',
+                    "",
+                    '"react@npm:^19.0.0":',
+                    '  resolution: "react@npm:19.0.0"',
+                    "",
+                    '"@types/react@npm:^19.0.0":',
+                    '  resolution: "@types/react@npm:19.0.1"',
+                ]),
+                encoding="utf-8",
+            )
+            now = siberia.datetime(2026, 5, 20, tzinfo=siberia.timezone.utc)
+
+            with patch("siberia.cli._npm_published_at", return_value=now) as mocked_lookup:
+                violations = siberia._check_yarn_lock(lockfile, 7, now)
+
+        self.assertEqual(
+            [(item.package, item.version) for item in violations],
+            [("react", "19.0.0"), ("@types/react", "19.0.1")],
+        )
+        self.assertEqual(mocked_lookup.call_count, 2)
+
+    def test_cmd_audit_lock_supports_modern_yarn_lock_with_resolution_metadata_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lockfile = root / "yarn.lock"
+            lockfile.write_text(
+                "\n".join([
+                    "__metadata:",
+                    '  version: 8',
+                    '  cacheKey: 10',
+                    "",
+                    '"react@npm:^19.0.0":',
+                    '  resolution: "react@npm:19.0.0::__archiveUrl=https%3A%2F%2Fregistry.npmjs.org%2Freact%2F-%2Freact-19.0.0.tgz"',
+                ]),
+                encoding="utf-8",
+            )
+            now = siberia.datetime(2026, 5, 20, tzinfo=siberia.timezone.utc)
+
+            with patch("siberia.cli._npm_published_at", return_value=now) as mocked_lookup:
+                violations = siberia._check_yarn_lock(lockfile, 7, now)
+
+        self.assertEqual([(item.package, item.version) for item in violations], [("react", "19.0.0")])
+        mocked_lookup.assert_called_once_with("react", "19.0.0")
+
+    def test_cmd_audit_lock_ignores_non_registry_yarn_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lockfile = root / "yarn.lock"
+            lockfile.write_text(
+                "\n".join([
+                    "__metadata:",
+                    '  version: 8',
+                    '  cacheKey: 10',
+                    "",
+                    '"left-pad@workspace:packages/left-pad":',
+                    '  resolution: "left-pad@workspace:packages/left-pad"',
+                    "",
+                    '"app@file:../app":',
+                    '  resolution: "app@file:../app"',
+                    "",
+                    '"react@npm:^19.0.0":',
+                    '  resolution: "react@npm:19.0.0"',
+                ]),
+                encoding="utf-8",
+            )
+            now = siberia.datetime(2026, 5, 20, tzinfo=siberia.timezone.utc)
+
+            with patch("siberia.cli._npm_published_at", return_value=now) as mocked_lookup:
+                violations = siberia._check_yarn_lock(lockfile, 7, now)
+
+        self.assertEqual([(item.package, item.version) for item in violations], [("react", "19.0.0")])
+        mocked_lookup.assert_called_once_with("react", "19.0.0")
+
     def test_cmd_audit_lock_supports_deno_lock_npm_entries_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -844,6 +1269,81 @@ class CheckCommandTests(unittest.TestCase):
                 mocked_datetime.side_effect = lambda *args, **kwargs: siberia.datetime(*args, **kwargs)
                 mocked_datetime.fromisoformat.side_effect = siberia.datetime.fromisoformat
                 with patch("siberia.cli._pypi_published_at", return_value=now):
+                    cwd = os.getcwd()
+                    try:
+                        os.chdir(root)
+                        rc = siberia.cmd_audit_lock(AppConfig(), [], True, out, err)
+                    finally:
+                        os.chdir(cwd)
+
+        self.assertEqual(rc, 1)
+        self.assertIn("VIOLATION:", out.getvalue())
+
+    def test_cmd_audit_lock_reports_unsupported_yarn_lock_format(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lockfile = root / "yarn.lock"
+            lockfile.write_text(
+                "\n".join([
+                    '"react@^19.0.0":',
+                    '  version "19.0.0"',
+                    '  resolved "https://registry.yarnpkg.com/react/-/react-19.0.0.tgz"',
+                ]),
+                encoding="utf-8",
+            )
+            out = io.StringIO()
+            err = io.StringIO()
+
+            rc = siberia.cmd_audit_lock(AppConfig(), [str(lockfile)], False, out, err)
+
+        self.assertEqual(rc, 0)
+        self.assertNotIn(f"OK {lockfile}", out.getvalue())
+        self.assertNotIn("all packages meet", out.getvalue())
+        self.assertIn("unsupported yarn.lock format", err.getvalue())
+
+    def test_check_yarn_lock_rejects_unsupported_format(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lockfile = root / "yarn.lock"
+            lockfile.write_text(
+                "\n".join([
+                    '"react@^19.0.0":',
+                    '  version "19.0.0"',
+                    '  resolved "https://registry.yarnpkg.com/react/-/react-19.0.0.tgz"',
+                ]),
+                encoding="utf-8",
+            )
+            now = siberia.datetime(2026, 5, 20, tzinfo=siberia.timezone.utc)
+
+            with self.assertRaises(ValueError) as ctx:
+                siberia._check_yarn_lock(lockfile, 7, now)
+
+        self.assertIn("unsupported yarn.lock format", str(ctx.exception))
+
+    def test_cmd_audit_lock_scan_discovers_yarn_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "nested").mkdir()
+            (root / "nested" / "yarn.lock").write_text(
+                "\n".join([
+                    "__metadata:",
+                    '  version: 8',
+                    '  cacheKey: 10',
+                    "",
+                    '"react@npm:^19.0.0":',
+                    '  resolution: "react@npm:19.0.0"',
+                ]),
+                encoding="utf-8",
+            )
+            out = io.StringIO()
+            err = io.StringIO()
+            now = siberia.datetime(2026, 5, 20, tzinfo=siberia.timezone.utc)
+
+            with patch("siberia.cli.datetime") as mocked_datetime:
+                mocked_datetime.now.return_value = now
+                mocked_datetime.side_effect = lambda *args, **kwargs: siberia.datetime(*args, **kwargs)
+                mocked_datetime.fromisoformat.side_effect = siberia.datetime.fromisoformat
+                with patch("siberia.cli._npm_published_at", return_value=now):
                     cwd = os.getcwd()
                     try:
                         os.chdir(root)
